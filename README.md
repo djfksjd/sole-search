@@ -25,7 +25,8 @@
 curl -fsSL https://raw.githubusercontent.com/djfksjd/sole-search/main/install.sh | bash
 ```
 
-Claude Code / Codex / Gemini CLI를 자동 감지해 각각 플러그인/확장으로 설치한다.
+Claude Code / Codex / agy(Antigravity) / Gemini CLI를 자동 감지해 설치하고, 없으면
+`~/.agents/skills/sole-search`로 클론한다(Cursor·Grok Build 등 파일 기반 호스트용).
 
 수동 설치 (Claude Code):
 

@@ -29,7 +29,8 @@ Collection is rule-based; all judgment is done by the LLM agent.
 curl -fsSL https://raw.githubusercontent.com/djfksjd/sole-search/main/install.sh | bash
 ```
 
-Detects Claude Code / Codex / Gemini CLI and installs the plugin/extension for each.
+Detects Claude Code / Codex / agy (Antigravity) / Gemini CLI; falls back to
+`~/.agents/skills/sole-search` for file-based hosts (Cursor, Grok Build, etc.).
 
 ## Quick start
 

@@ -2,8 +2,10 @@
 # sole-search one-command installer
 #   curl -fsSL https://raw.githubusercontent.com/djfksjd/sole-search/main/install.sh | bash
 #
-# Detects installed host CLIs (claude / codex / gemini) and installs the
-# plugin/extension for each. Per-host failures are non-fatal.
+# Detects installed host CLIs (claude / codex / agy / gemini) and installs the
+# plugin/extension for each. If no CLI is found, falls back to cloning into
+# ~/.agents/skills/sole-search (picked up by Cursor, Grok Build, and other
+# file-based hosts). Per-host failures are non-fatal.
 set -u
 
 REPO="djfksjd/sole-search"
@@ -33,12 +35,34 @@ if command -v codex >/dev/null 2>&1; then
     "codex plugin marketplace add ${REPO} && codex plugin add sole-search@djfksjd"
 fi
 
+if command -v agy >/dev/null 2>&1; then
+  try_host "agy (Antigravity CLI)" bash -c \
+    "agy plugin install ${REPO} && agy plugin enable sole-search"
+fi
+
 if command -v gemini >/dev/null 2>&1; then
   try_host "Gemini CLI" gemini extensions install "https://github.com/${REPO}"
 fi
 
+# File-based hosts (Cursor, Grok Build, ...) read ~/.agents/skills/.
+# Also serves as the fallback when no host CLI was detected.
+SKILL_DIR="${HOME}/.agents/skills/sole-search"
+if [ -d "${SKILL_DIR}/.git" ]; then
+  git -C "${SKILL_DIR}" pull --ff-only >/dev/null 2>&1 \
+    && log "✓ ~/.agents/skills/sole-search 갱신 (Cursor·Grok Build 등)" \
+    || warn "✗ ~/.agents/skills/sole-search 갱신 실패 — 수동으로 git pull 하세요"
+elif [ ! -e "${SKILL_DIR}" ]; then
+  mkdir -p "${HOME}/.agents/skills"
+  if git clone --quiet "${REPO_URL}" "${SKILL_DIR}"; then
+    log "✓ ~/.agents/skills/sole-search clone (Cursor·Grok Build 등)"
+    INSTALLED=$((INSTALLED + 1))
+  else
+    warn "✗ clone 실패: ${SKILL_DIR}"
+  fi
+fi
+
 if [ "${INSTALLED}" -eq 0 ]; then
-  warn "설치된 호스트가 없습니다. 지원 호스트: Claude Code·Codex·Gemini CLI (README 참조)"
+  warn "설치된 호스트가 없습니다. 지원 호스트: Claude Code·Codex·agy·Gemini CLI·Cursor·Grok Build (README 참조)"
   exit 1
 fi
 log "완료 — 새 세션에서 '우리 가게 지원사업 찾아줘'로 사용하세요."
