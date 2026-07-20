@@ -72,7 +72,10 @@ bizType(유관기관지원사업 등, 통합조회), pbancId(통합조회), hstg
 순회**한다 (스펙 4장). 소상공인24 통합조회(combinePbanc)가 기업마당 연계분(`PBLN_*`)을 일부
 포함하므로, 중복 제거는 `pbancId`/`pblancId` 기준으로 교차 소스 병합한다.
 
-상세·첨부: 공고 상세 페이지 HTML + 첨부파일 링크. (구현 시 갱신)
+출력은 sole-search 공통 스키마(source_id=PBLN_*, canonical_url, agency, status...)다.
+상세: `sources_crawl.py detail <URL> --merge-into bizinfo.jsonl` — 본문 텍스트·첨부 링크를
+저장하고 목록 레코드에 content_hash·attachments를 병합한다. 첨부 링크가 있는데 아직
+추출하지 않았으면 `attachments_complete: false`로 남는다 (그 후보는 '확인됨' 금지).
 
 ## 3. 소진공 정책자금 — 필수
 
@@ -81,8 +84,8 @@ bizType(유관기관지원사업 등, 통합조회), pbancId(통합조회), hstg
 범위에 이미 포함되며, 첨부 PDF 추출로 세부(금리·한도·대상)를 읽는다.
 
 **2차 경로 (수동확인)**: 회차별 실시간 접수상태·예산소진은 소상공인정책자금 사이트
-(ols.sbiz.or.kr)에서 확인해야 한다. 로그인 장벽이 있으므로 크롤링하지 않고, 보고서의 loan
-항목에 "회차 접수상태는 ols.sbiz.or.kr 또는 ☎1357에서 확인" 문구를 필수 표기하고
+(ols.semas.or.kr)에서 확인해야 한다. 로그인 장벽이 있으므로 크롤링하지 않고, 보고서의 loan
+항목에 "회차 접수상태는 ols.semas.or.kr 또는 ☎1357에서 확인" 문구를 필수 표기하고
 coverage_manifest에 `semas_loan_status: manual`로 기록한다.
 
 ## 4. 지역신용보증재단 — 지역 레지스트리 (manual)

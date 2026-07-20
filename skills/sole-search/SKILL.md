@@ -130,10 +130,11 @@ stderr의 `TOTAL/COLLECTED/DUPLICATES`·`PAGES/CRAWLED`를 기록한다 — cove
 candidate와 needs_detail 레코드는 상세 원문을 확인한다:
 
 ```bash
-# 소상공인24 상세+첨부 (첨부 PDF 자동 다운로드)
-python3 ".../scripts/sbiz_crawl.py" detail <pbancSn> --download-dir details -o details/<pbancSn>.json
-# 기업마당 상세
-python3 ".../scripts/sources_crawl.py" detail "<URL>" -o details
+# 소상공인24 상세+첨부 (첨부 자동 다운로드 + 목록 jsonl에 content_hash 병합)
+python3 ".../scripts/sbiz_crawl.py" detail <pbancSn> --download-dir details \
+    -o details/<pbancSn>.json --merge-into sbiz24.jsonl
+# 기업마당 상세 (본문 해시·첨부 링크를 목록에 병합)
+python3 ".../scripts/sources_crawl.py" detail "<URL>" -o details --merge-into bizinfo.jsonl
 # 첨부 텍스트 추출 (HWP는 실패가 정상 — 그 후보는 '확인 필요')
 python3 ".../scripts/attach_extract.py" details/<파일> -o details/<파일>.txt
 ```
@@ -152,7 +153,9 @@ python3 ".../scripts/attach_extract.py" details/<파일> -o details/<파일>.txt
 소재지(본점/사업장 구분), 기수혜 제외, 영업상태.
 
 규칙:
-- **첨부를 읽지 못한 후보는 `확인됨` 금지** → `확인 필요` + "첨부 미확인(사유)"
+- **첨부를 읽지 못한 후보(`attachments_complete: false` 포함)는 `확인됨` 금지** → `확인 필요` + "첨부 미확인(사유)"
+- **status가 `불명`인 레코드는 접수 여부부터 상세에서 확인** — 크롤러는 낙관 추정하지 않는다
+- 크롤러 종료 코드 3(MANUAL)은 차단 신호다 — 재시도하지 말고 해당 소스를 manual로 기록
 - 각 판정에 근거 출처(문서·문구)를 기록
 - `확인됨` = 공고상 신청자격 확인일 뿐, 선정·대출심사 통과 예측이 아님 — 보고서에 명시
 - 연락처는 `contacts: [{kind: phone|email|url, value}]`, 없으면 "연락처 미기재"

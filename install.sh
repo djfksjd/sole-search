@@ -61,16 +61,6 @@ elif [ ! -e "${SKILL_DIR}" ]; then
   fi
 fi
 
-# Optional dependency: curl_cffi (안정적 fetch용 — 없어도 urllib로 동작)
-if python3 -c 'import curl_cffi' >/dev/null 2>&1; then
-  log "✓ curl_cffi 이미 설치됨"
-elif pip3 install 'curl_cffi>=0.15' >/dev/null 2>&1 \
-  || pip3 install --user 'curl_cffi>=0.15' >/dev/null 2>&1; then
-  log "✓ curl_cffi 설치 완료"
-else
-  warn "✗ curl_cffi 설치 실패 — 크롤러 첫 실행 전 수동 설치: pip3 install 'curl_cffi>=0.15'"
-fi
-
 if [ "${INSTALLED}" -eq 0 ]; then
   warn "설치된 호스트가 없습니다. 지원 호스트: Claude Code·Codex·agy·Gemini CLI·Cursor·Grok Build (README 참조)"
   exit 1

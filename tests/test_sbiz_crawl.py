@@ -64,3 +64,35 @@ def test_attachments_parsed():
     f = files[0]
     assert f["filename"].endswith(".pdf")
     assert f["url"] == "https://www.sbiz24.kr/api/cmmn/file/" + f["file_id"]
+
+
+def test_status_unknown_is_bulmyeong_not_open():
+    # 리뷰 블로커 4 회귀: 알 수 없는 상태를 '접수중'으로 낙관 추정하지 않는다
+    assert sbiz_crawl._status({"aplyPsbltySe": "", "rcptPd": None, "aplyPd": None}) == "불명"
+    assert sbiz_crawl._status({"aplyPsbltySe": "이상한값"}) == "불명"
+
+
+def test_status_combine_period_string_uses_end_date():
+    # "시작 ~ 끝" 문자열에서 끝 날짜로 판정해야 한다 (시작일 오판 회귀)
+    fut = {"aplyPsbltySe": "", "aplyPd": "2020-01-01 ~ 2099-12-31"}
+    past = {"aplyPsbltySe": "", "aplyPd": "2020-01-01 ~ 2020-02-01"}
+    assert sbiz_crawl._status(fut) == "접수중"
+    assert sbiz_crawl._status(past) == "마감"
+
+
+def test_safe_filename_blocks_traversal():
+    out = sbiz_crawl.safe_filename("abcd1234-x", "../../etc/passwd")
+    assert ".." not in out and "/" not in out
+    out2 = sbiz_crawl.safe_filename("abcd1234-x", "정상 파일명(1).pdf")
+    assert out2.endswith(".pdf")
+
+
+def test_merge_detail_updates_content_hash(tmp_path):
+    rec = {"source": "sbiz24", "source_id": "679", "title": "t",
+           "content_hash": None, "attachments": [], "attachments_complete": False}
+    p = tmp_path / "sbiz24.jsonl"
+    p.write_text(json.dumps(rec, ensure_ascii=False) + "\n")
+    ok = sbiz_crawl.merge_detail(str(p), "679", "hash1", [{"file_id": "f"}], True)
+    assert ok
+    r = json.loads(p.read_text())
+    assert r["content_hash"] == "hash1" and r["attachments_complete"] is True

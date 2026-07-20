@@ -41,3 +41,20 @@ def test_missing_file_fails_explicitly():
     r = attach_extract.extract("no/such/file.pdf")
     assert r["ok"] is False
     assert r["reason"] == "file_not_found"
+
+
+def test_hwpx_sections_natural_sort():
+    assert attach_extract._section_no("Contents/section10.xml") == 10
+    names = ["Contents/section10.xml", "Contents/section2.xml", "Contents/section1.xml"]
+    assert sorted(names, key=attach_extract._section_no) == [
+        "Contents/section1.xml", "Contents/section2.xml", "Contents/section10.xml"]
+
+
+def test_hwpx_zip_bomb_entry_limit(tmp_path):
+    import zipfile
+    p = tmp_path / "bomb.hwpx"
+    with zipfile.ZipFile(p, "w") as z:
+        for i in range(attach_extract.MAX_ZIP_ENTRIES + 1):
+            z.writestr(f"junk{i}.txt", "x")
+    r = attach_extract.extract(str(p))
+    assert r["ok"] is False and r["reason"] == "hwpx_too_many_entries"

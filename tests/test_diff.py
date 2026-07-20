@@ -71,3 +71,27 @@ def test_cli_diff(tmp_path):
     assert ("3", "NEW") in kinds
     assert ("2", "CHANGED") in kinds
     assert "GONE" in p.stderr and "1" in p.stderr  # source_id=1 소멸
+
+
+def test_duplicate_key_fails_closed(tmp_path):
+    p = tmp_path / "s.jsonl"
+    rec = json.dumps(BASE, ensure_ascii=False)
+    p.write_text(rec + "\n" + rec + "\n")
+    import pytest
+    with pytest.raises(SystemExit):
+        d.load_dir(str(tmp_path))
+
+
+def test_missing_source_id_fails_closed(tmp_path):
+    (tmp_path / "s.jsonl").write_text('{"source": "bizinfo", "title": "x"}\n')
+    import pytest
+    with pytest.raises(SystemExit):
+        d.load_dir(str(tmp_path))
+
+
+def test_screening_and_diff_outputs_ignored(tmp_path):
+    (tmp_path / "screening.jsonl").write_text('{"broken": true}\n')
+    (tmp_path / "new_items.jsonl").write_text('{"kind": "NEW", "record": {}}\n')
+    (tmp_path / "s.jsonl").write_text(json.dumps(BASE, ensure_ascii=False) + "\n")
+    records, sources = d.load_dir(str(tmp_path))
+    assert len(records) == 1 and sources == {"sbiz24"}

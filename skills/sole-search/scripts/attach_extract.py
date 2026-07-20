@@ -27,7 +27,12 @@ def _result(ok, text="", reason=""):
     return {"ok": ok, "text": text, "reason": reason}
 
 
+MAX_PDF_BYTES = 100 * 1024 * 1024
+
+
 def extract_pdf(path):
+    if path.stat().st_size > MAX_PDF_BYTES:
+        return _result(False, reason="pdf_too_large")
     if not shutil.which("pdftotext"):
         return _result(False, reason="pdftotext_unavailable")
     try:
@@ -43,12 +48,27 @@ def extract_pdf(path):
     return _result(True, text=text)
 
 
+MAX_ZIP_ENTRIES = 2000
+MAX_UNCOMPRESSED = 200 * 1024 * 1024  # 200MB — ZIP bomb 방어
+
+
+def _section_no(name):
+    m = re.search(r"section(\d+)\.xml$", name)
+    return int(m.group(1)) if m else 0
+
+
 def extract_hwpx(path):
     try:
         texts = []
         with zipfile.ZipFile(path) as z:
-            sections = sorted(n for n in z.namelist()
-                              if re.match(r"Contents/section\d+\.xml$", n))
+            infos = z.infolist()
+            if len(infos) > MAX_ZIP_ENTRIES:
+                return _result(False, reason="hwpx_too_many_entries")
+            if sum(i.file_size for i in infos) > MAX_UNCOMPRESSED:
+                return _result(False, reason="hwpx_uncompressed_too_large")
+            sections = sorted((n for n in z.namelist()
+                               if re.match(r"Contents/section\d+\.xml$", n)),
+                              key=_section_no)
             if not sections:
                 return _result(False, reason="hwpx_no_sections")
             for name in sections:

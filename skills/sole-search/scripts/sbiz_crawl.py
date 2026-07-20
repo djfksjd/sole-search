@@ -14,8 +14,11 @@
 수집 실패(부분 수집)면 종료 코드 2.
 """
 import argparse
+import hashlib
 import html
 import json
+import os
+import pathlib
 import re
 import sys
 import time
@@ -42,21 +45,35 @@ EMPTY_SEARCH = {
 LIST_URLS = {"pbanc": "/api/pbanc/sbiz24PbancList", "combine": "/api/combinePbanc/list"}
 
 
+class ManualEscalation(RuntimeError):
+    """401/403 — 우회하지 않고 manual로 전환하라는 신호 (종료 코드 3)."""
+
+
 def post(path, body, retries=3, delay=0.5):
     req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(), headers=HEADERS)
     last = None
     for i in range(retries):
         try:
             with urllib.request.urlopen(req, timeout=30) as r:
-                return json.loads(r.read().decode())
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError) as e:
+                data = json.loads(r.read().decode())
+            if data.get("result") is False or "data" not in data:
+                raise RuntimeError(f"POST {path}: API result=false 또는 구조 변경 "
+                                   f"({str(data)[:120]})")
+            return data
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise ManualEscalation(f"HTTP {e.code} — 차단/인증 요구. manual 전환") from e
             last = e
-            time.sleep(delay * (i + 1))
+            if not (e.code == 429 or e.code >= 500):
+                break  # 4xx는 재시도 무의미
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+            last = e
+        time.sleep(delay * (i + 1))
     raise RuntimeError(f"POST {path} failed after {retries} tries: {last}")
 
 
 def now_kst():
-    return datetime.now(KST).strftime("%Y-%m-%d %H:%M:%S+09:00")
+    return datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
 
 
 def total_count(data):
@@ -74,21 +91,30 @@ def _period(p):
 
 
 def _status(item):
-    """사이트 표현을 status enum으로 정규화한다."""
+    """사이트 표현을 status enum으로 정규화. 판정 불가면 '불명' — 낙관 추정 금지."""
     aply = str(item.get("aplyPsbltySe") or "")
-    _, end = _period(item.get("rcptPd")) if item.get("rcptPd") else (None, item.get("aplyPd"))
     if aply in ("Y", "신청가능"):
         return "접수중"
     if aply in ("N", "신청불가", "마감"):
         return "마감"
-    # aplyPsbltySe가 비어있으면 접수기간으로 판정
+    if "상시" in aply:
+        return "상시"
+    if "예산" in aply or "소진" in aply:
+        return "예산소진"
+    if "예정" in aply:
+        return "회차예정"
+    # aplyPsbltySe가 비면 접수 마감일로 판정 (combine의 aplyPd는 "시작 ~ 끝" 문자열)
+    end = _period(item.get("rcptPd"))[1] if item.get("rcptPd") else None
+    if end is None and item.get("aplyPd"):
+        parts = str(item.get("aplyPd")).split("~")
+        end = parts[1].strip() if len(parts) == 2 else None
     if end:
         try:
             end_d = datetime.strptime(str(end)[:10], "%Y-%m-%d").replace(tzinfo=KST)
             return "접수중" if end_d >= datetime.now(KST) - timedelta(days=1) else "마감"
         except ValueError:
             pass
-    return "접수중"
+    return "불명"
 
 
 def strip_html(text):
@@ -132,8 +158,9 @@ def to_record(item, mode):
     rec.update({
         "status": _status(item),
         "primary_type": None,   # 판정 단계(LLM)에서 채운다
-        "tags": [t for t in str(item.get("hstgNm") or "").split(",") if t],
+        "tags": [s.strip() for s in str(item.get("hstgNm") or "").split(",") if s.strip()],
         "attachments": [],
+        "attachments_complete": False,
         "crawled_at": crawled,
         "content_hash": None,
         "raw": {k: item.get(k) for k in ("rcrtTypeCdNm", "bizType", "pbancKindCd",
@@ -158,6 +185,8 @@ def parse_files(data, pbanc_sn):
     out = []
     for f in data["data"]["default"]["list"]:
         fid = f.get("fileId") or ""
+        if not fid:
+            continue
         out.append({
             "file_id": fid,
             "filename": f.get("fileNm") or "",
@@ -205,7 +234,8 @@ def cmd_list(args):
     modes = ["pbanc", "combine"] if args.target == "all" else [args.target]
     grand_total = grand_collected = 0
     ok = True
-    with open(args.output, "w", encoding="utf-8") as out:
+    tmp_path = args.output + ".tmp"
+    with open(tmp_path, "w", encoding="utf-8") as out:
         for mode in modes:
             try:
                 total, collected, fetched = crawl_list(mode, out, args.page_size, args.delay)
@@ -220,8 +250,37 @@ def cmd_list(args):
             grand_collected += collected
             if fetched < total:  # 중복 제외 실누락만 실패로 본다
                 ok = False
+    os.replace(tmp_path, args.output)
     print(f"TOTAL {grand_total} COLLECTED {grand_collected}", file=sys.stderr)
     return 0 if ok else 2
+
+
+MAX_ATTACH_BYTES = 50 * 1024 * 1024  # 첨부 다운로드 상한 50MB
+
+
+def safe_filename(file_id, filename):
+    """서버 제공 파일명을 신뢰하지 않는다 — basename + 문자 정제 + fileId 프리픽스."""
+    base = re.sub(r"[^\w.\-가-힣()\[\] ]", "_", filename.replace("\\", "/").rsplit("/", 1)[-1])
+    return f"{file_id[:8]}_{base[:120]}" if base else file_id
+
+
+def download_capped(url, path):
+    req = urllib.request.Request(url, headers=HEADERS)
+    with urllib.request.urlopen(req, timeout=60) as r, open(path, "wb") as fh:
+        read = 0
+        while True:
+            chunk = r.read(1 << 20)
+            if not chunk:
+                return read
+            read += len(chunk)
+            if read > MAX_ATTACH_BYTES:
+                raise RuntimeError(f"첨부가 {MAX_ATTACH_BYTES // (1 << 20)}MB 상한 초과")
+            fh.write(chunk)
+
+
+def content_hash_of(body_text, attachment_hashes):
+    payload = body_text + "\n" + "\n".join(sorted(attachment_hashes))
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
 
 
 def cmd_detail(args):
@@ -231,21 +290,36 @@ def cmd_detail(args):
     files_data = post("/api/cmmn/file", {"search": {"groupId": f"pbancdoc-{args.pbanc_sn}",
                                                     "tmprStrgYn": "N", "delYn": False}})
     detail["attachments"] = parse_files(files_data, args.pbanc_sn)
+    attach_hashes = []
+    complete = True
     if args.download_dir:
-        import pathlib
-        d = pathlib.Path(args.download_dir)
+        d = pathlib.Path(args.download_dir).resolve()
         d.mkdir(parents=True, exist_ok=True)
         for f in detail["attachments"]:
             time.sleep(args.delay)
-            req = urllib.request.Request(f["url"], headers=HEADERS)
+            path = (d / safe_filename(f["file_id"], f["filename"])).resolve()
+            if not str(path).startswith(str(d)):
+                f["download_error"] = "path_escape_blocked"
+                complete = False
+                continue
             try:
-                with urllib.request.urlopen(req, timeout=60) as r:
-                    path = d / f["filename"]
-                    path.write_bytes(r.read())
-                    f["local_path"] = str(path)
-            except (urllib.error.URLError, urllib.error.HTTPError) as e:
+                download_capped(f["url"], path)
+                f["local_path"] = str(path)
+                attach_hashes.append(hashlib.sha256(path.read_bytes()).hexdigest()[:16])
+            except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError, OSError) as e:
                 f["download_error"] = str(e)
+                complete = False
                 print(f"WARNING attachment {f['filename']}: {e}", file=sys.stderr)
+    else:
+        complete = not detail["attachments"]  # 다운로드 안 했으면 첨부 존재 시 미완
+    detail["attachments_complete"] = complete
+    detail["content_hash"] = content_hash_of(detail["body_text"], attach_hashes)
+    if args.merge_into:
+        merged = merge_detail(args.merge_into, detail["source_id"], detail["content_hash"],
+                              detail["attachments"], complete)
+        if not merged:
+            print(f"WARNING: source_id={detail['source_id']} 레코드를 "
+                  f"{args.merge_into}에서 못 찾음", file=sys.stderr)
     text = json.dumps(detail, ensure_ascii=False, indent=2)
     if args.output:
         open(args.output, "w", encoding="utf-8").write(text)
@@ -254,21 +328,59 @@ def cmd_detail(args):
     return 0
 
 
+def merge_detail(jsonl_path, source_id, content_hash, attachments, complete):
+    """목록 jsonl의 해당 레코드에 상세 검증 결과를 병합한다 (원자적 교체)."""
+    tmp = jsonl_path + ".tmp"
+    found = False
+    with open(jsonl_path, encoding="utf-8") as src, open(tmp, "w", encoding="utf-8") as dst:
+        for line in src:
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            if str(r.get("source_id")) == str(source_id):
+                r["content_hash"] = content_hash
+                r["attachments"] = attachments
+                r["attachments_complete"] = complete
+                found = True
+            dst.write(json.dumps(r, ensure_ascii=False) + "\n")
+    os.replace(tmp, jsonl_path)
+    return found
+
+
+def positive_int(v):
+    n = int(v)
+    if n <= 0:
+        raise argparse.ArgumentTypeError("양수여야 한다")
+    return n
+
+
+def min_delay(v):
+    f = float(v)
+    if f < 0.5:
+        raise argparse.ArgumentTypeError("딜레이는 최소 0.5초 (예의상 강제)")
+    return f
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
     sub = ap.add_subparsers(dest="cmd", required=True)
     lp = sub.add_parser("list")
     lp.add_argument("target", choices=["pbanc", "combine", "all"], nargs="?", default="all")
     lp.add_argument("-o", "--output", required=True)
-    lp.add_argument("--page-size", type=int, default=100)
-    lp.add_argument("--delay", type=float, default=0.5)
+    lp.add_argument("--page-size", type=positive_int, default=100)
+    lp.add_argument("--delay", type=min_delay, default=0.5)
     dp = sub.add_parser("detail")
     dp.add_argument("pbanc_sn")
     dp.add_argument("-o", "--output")
     dp.add_argument("--download-dir")
-    dp.add_argument("--delay", type=float, default=0.5)
+    dp.add_argument("--merge-into", help="목록 jsonl에 content_hash·첨부 결과 병합")
+    dp.add_argument("--delay", type=min_delay, default=0.5)
     args = ap.parse_args()
-    sys.exit(cmd_list(args) if args.cmd == "list" else cmd_detail(args))
+    try:
+        sys.exit(cmd_list(args) if args.cmd == "list" else cmd_detail(args))
+    except ManualEscalation as e:
+        print(f"MANUAL sbiz24: {e}", file=sys.stderr)
+        sys.exit(3)
 
 
 if __name__ == "__main__":

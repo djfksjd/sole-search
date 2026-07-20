@@ -24,24 +24,42 @@ COMPARE_FIELDS = ["title", "status", "apply_start", "apply_end",
                   "rate", "limit_amount", "agency", "content_hash"]
 
 # 판정에 영향을 주는 프로필 필드만 fingerprint에 넣는다
-PROFILE_FIELDS = ["entity_type", "business_status", "industry_text", "registration_date",
-                  "regular_employee_count", "headcount", "sbiz_certificate",
-                  "sales_band", "sales_basis", "province", "district", "hq_district",
+PROFILE_FIELDS = ["entity_type", "business_status", "closure_date", "industry_text",
+                  "registration_date", "regular_employee_count", "headcount",
+                  "sbiz_certificate", "sbiz_certificate_valid_until",
+                  "sales_band", "sales_basis", "sales_vs_industry_threshold",
+                  "threshold_industry_code", "sales_threshold_as_of",
+                  "province", "district", "hq_district",
                   "owner_age_band", "owner_gender", "needs"]
 
 
+SKIP_FILES = {"screening.jsonl", "new_items.jsonl"}
+
+
 def load_dir(path):
+    """원시 수집 jsonl만 로드. 스키마 위반·중복 키는 즉시 실패한다 (fail-closed)."""
     records = {}
     sources = set()
     for f in sorted(glob.glob(os.path.join(path, "*.jsonl"))):
-        for line in open(f, encoding="utf-8"):
+        if os.path.basename(f) in SKIP_FILES:
+            continue
+        for ln, line in enumerate(open(f, encoding="utf-8"), 1):
             line = line.strip()
             if not line:
                 continue
             r = json.loads(line)
-            key = (r.get("source"), str(r.get("source_id")))
+            if "kind" in r and "record" in r:
+                continue  # 이전 diff 산출물 혼입 방어
+            src, sid = r.get("source"), r.get("source_id")
+            if not src or sid in (None, "", "None"):
+                print(f"ERROR: {f}:{ln} source/source_id 누락 — 스키마 위반", file=sys.stderr)
+                sys.exit(1)
+            key = (src, str(sid))
+            if key in records:
+                print(f"ERROR: {f}:{ln} 중복 키 {key} — 수집 단계 버그", file=sys.stderr)
+                sys.exit(1)
             records[key] = r
-            sources.add(r.get("source"))
+            sources.add(src)
     return records, sources
 
 
@@ -95,12 +113,20 @@ def main():
 
     invalidate = False
     if args.old_profile and args.new_profile:
-        fp_old = profile_fingerprint(parse_profile_frontmatter(args.old_profile))
-        fp_new = profile_fingerprint(parse_profile_frontmatter(args.new_profile))
-        if not carryover_valid(fp_old, fp_new):
+        old_fields = parse_profile_frontmatter(args.old_profile)
+        new_fields = parse_profile_frontmatter(args.new_profile)
+        if not old_fields or not new_fields:
+            invalidate = True  # fail-closed: 프로필을 못 읽으면 승계하지 않는다
+            print("WARNING: 프로필 파일을 읽지 못했다 — 승계 무효(fail-closed), 전체 재검토",
+                  file=sys.stderr)
+        elif not carryover_valid(profile_fingerprint(old_fields),
+                                 profile_fingerprint(new_fields)):
             invalidate = True
             print("WARNING: 프로필이 바뀌었다 — 직전 판정 승계 무효, 전체를 NEW로 재검토",
                   file=sys.stderr)
+    else:
+        print("NOTE: 프로필 미지정 — 판정 승계 유효성(fingerprint)이 검증되지 않았다. "
+              "--old-profile/--new-profile 지정 권장", file=sys.stderr)
 
     missing_sources = old_sources - new_sources
     for s in missing_sources:
