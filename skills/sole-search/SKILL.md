@@ -127,6 +127,10 @@ stderr의 `TOTAL/COLLECTED/DUPLICATES`·`PAGES/CRAWLED`를 기록한다 — cove
 - 각 레코드에 `screening: candidate | excluded | needs_detail` + 제외 사유를 붙여 `screening.jsonl`로 저장
 - 프로필의 needs·업종·지역과 명백히 무관해도 "excluded + 사유"로 기록하고 넘어간다 (조용히 버리지 않는다)
 - 중단되면 어디까지 검토했는지 기록하고 coverage를 partial로 보고
+- **모델 분기(비용 최적화)**: 선별은 거친 1차 통과라 서브에이전트를 **저비용 모델**(Claude Code면
+  `model: haiku`)로 돌려도 된다 — 실수는 2단계 판정에서 걸러진다. 단 방향이 중요하다:
+  **애매하면 excluded가 아니라 `candidate`/`needs_detail`로** (과소 선별은 2단계가 못 되살린다).
+  2단계 자격 판정은 원문·첨부 해석이 필요하므로 세션 기본 모델을 유지한다
 
 ## 2단계 — 자격 판정
 
