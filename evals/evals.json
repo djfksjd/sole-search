@@ -1,0 +1,16 @@
+{
+  "skill": "sole-search",
+  "description": "트리거 정확도 평가 — positive는 sole-search가 발동해야 하고, negative는 ir-search(또는 다른 스킬)로 가야 하며, ambiguous는 분기 질문이 나와야 한다.",
+  "cases": [
+    {"id": "pos-1", "type": "positive", "prompt": "우리 치킨집에 맞는 지원금 좀 찾아줘", "expect": "sole-search 발동, 프로필 인터뷰 시작"},
+    {"id": "pos-2", "type": "positive", "prompt": "소상공인 정책자금 대출 알아봐줘", "expect": "sole-search 발동, loan 범위 포함"},
+    {"id": "pos-3", "type": "positive", "prompt": "가게 시설 개선하는 데 나라에서 지원해주는 거 있어?", "expect": "sole-search 발동"},
+    {"id": "pos-4", "type": "positive", "prompt": "장사 접으려는데 폐업 지원 같은 거 있나", "expect": "sole-search 발동, recovery 니즈"},
+    {"id": "pos-5", "type": "positive", "prompt": "지난번 조사 이후에 새로 나온 지원사업 있어?", "expect": "sole-search diff 모드 (sole-profile.md 존재 시)"},
+    {"id": "neg-1", "type": "negative", "prompt": "우리 아이템에 맞는 창업지원 사업 찾아줘", "expect": "ir-search 발동 (sole-search 아님)"},
+    {"id": "neg-2", "type": "negative", "prompt": "K-Startup 공고 전수조사 해줘", "expect": "ir-search 발동"},
+    {"id": "neg-3", "type": "negative", "prompt": "입주공간 지원되는 프로그램 알아봐", "expect": "ir-search 발동"},
+    {"id": "amb-1", "type": "ambiguous", "prompt": "온라인 셀러 지원금 찾아줘", "expect": "운영 중 사업(sole-search)인지 창업 준비(ir-search)인지 한 번 질문"},
+    {"id": "amb-2", "type": "ambiguous", "prompt": "카페 하는데 새로운 기술 아이템으로 R&D 과제 해보고 싶어", "expect": "요청 목적 우선 — ir-search로 라우팅"}
+  ]
+}

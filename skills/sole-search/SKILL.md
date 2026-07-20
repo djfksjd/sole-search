@@ -1,0 +1,182 @@
+---
+name: sole-search
+description: 운영 중인 소상공인(가게·점포·자영업자)을 위한 지원사업 조사 스킬. 소상공인24·기업마당 공고를 전수 수집하고 가게 프로필(업종·지역·업력·직원수·매출)로 자격을 판정해 "오늘 신청할 것"부터 보고한다. 보조금·바우처, 정책자금(대출·보증), 교육·컨설팅 전 범위. 사용자가 "우리 가게 지원사업", "소상공인 지원금", "정책자금 알아봐줘", "가게 시설개선 지원", "사장님 지원 뭐 있어", "소상공인24 조사", "폐업/재기 지원" 등을 요청하면 이 스킬을 사용한다. 재조사("새로 나온 거 있나", "지난번 이후 뭐 올라왔나")는 diff 모드로 사용. 반대로 "우리 아이템", "창업지원", "예비창업", "K-Startup", "TIPS", "R&D 과제", "입주공간", "액셀러레이팅" 등 아이템·프로젝트 기반 창업지원 탐색은 이 스킬이 아니라 ir-search를 사용한다. 신호가 섞이면(예: "온라인 셀러 지원금") 어느 쪽인지 한 번 묻는다. 사용자 신분보다 요청 목적이 우선이다 — 가게 사장이라도 신규 기술 아이템 R&D를 찾으면 ir-search. 한국 전용.
+---
+
+# sole-search — 소상공인 지원사업 조사
+
+> **스크립트 위치**: `${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/` (단독 스킬 설치 시 스킬 디렉토리 자체). 아래 명령의 경로 변수를 환경에 맞게 치환해 실행한다.
+
+이 스킬은 "룰베이스 수집 + LLM 판정" 구조다. 스크립트는 공고를 기계적으로 수집만 하고,
+선별·자격 판정·보고서는 에이전트(너)가 한다.
+
+세 가지 원칙 (위반 금지):
+
+1. **조용한 누락 금지** — 커버하지 못한 소스·읽지 못한 첨부는 보고서에 명시한다. 모든 보고서에 coverage_manifest가 있어야 한다.
+2. **추정 금지** — 공고 원문에 없는 것은 '불명'. 첨부를 읽지 못했으면 `확인됨` 판정 금지.
+3. **허위신청 유도 금지** — "변형하면 가능" 식 프레이밍을 쓰지 않는다. 실제 등록업종·영업내용이 뒷받침되는 것만 후보다.
+
+## 0단계 — 프로필
+
+**먼저 현재 작업 폴더에서 `sole-profile.md`를 찾는다.** 있으면 본문 요약을 보여주고
+"바뀐 것 있나요?" **한 번만** 묻고 1단계로 간다.
+
+없으면 쉬운 말로, 관공서 용어 없이, **한 번에** 묻는다 (이미 대화·폴더에서 파악된 항목은 제외):
+
+1. 무슨 장사/사업을 하세요? (예: 치킨집, 네일샵, 스마트스토어)
+2. 개인사업자세요, 법인이세요? 지금 정상 영업 중이세요?
+3. 가게는 어느 동네예요? (시·군·구까지. 사업자등록상 주소가 다르면 둘 다)
+4. 사업자 등록은 언제 하셨어요? (년·월)
+5. 직원은 몇 명이에요? (4대보험 가입 기준과, 가족·알바 포함 인원을 구분해서)
+6. 혹시 소상공인확인서(중소기업현황정보시스템 발급) 있으세요? 유효기간은?
+7. (확인서 없으면) 작년 매출이 대략 어느 정도예요? — 3천만 미만 / 3천만~1억 / 1억~5억 / 5억~10억 / 10억~30억 / 30억 이상
+8. 대표님 나이대와 성별은? (건너뛰어도 됨)
+9. 지금 제일 필요한 건? (복수) — 안 갚는 돈 / 빌리는 돈 / 가게 시설 / 온라인 판매 / 홍보 / 배우기 / 정리·재기
+
+확정되면 `sole-profile.md`로 저장한다. **YAML 프론트매터는 원자 필드**로 쓴다:
+
+```markdown
+---
+schema_version: 1
+type: sole-search-profile
+entity_type: individual | corporation
+business_status: active | suspended | closing | closed
+closure_date: YYYY-MM            # closed일 때만
+industry_text: <사용자 표현 그대로>
+industry_code_candidates:
+  - {code: <KSIC>, label: <업종명>, confidence: high|medium|low}
+registration_date: YYYY-MM
+regular_employee_count: <N>      # 4대보험 기준
+headcount: <N>                   # 가족·알바 포함
+employee_count_as_of: YYYY-MM-DD
+sbiz_certificate: none | valid | expired
+sbiz_certificate_valid_until: YYYY-MM-DD
+sales_band: lt_30m | 30m_100m | 100m_500m | 500m_1b | 1b_3b | gte_3b
+sales_period: <YYYY 연간>
+sales_basis: statutory_average | recent_year_proxy
+sales_vs_industry_threshold: below | near | above | unknown
+threshold_industry_code: <KSIC>
+sales_threshold_as_of: YYYY-MM-DD
+province: <시/도>
+district: <시/군/구>
+hq_district: <본점, 다를 때만>
+owner_age_band: 20s|30s|40s|50s|60s_plus|unspecified
+owner_gender: female | male | unspecified
+needs: [grant, loan, facility, online_sales, marketing, education, recovery]
+last_survey_at: YYYY-MM-DD
+last_survey_dir: <보고서 폴더>
+survey_sources: [sbiz24, sbiz24_combine, bizinfo]
+---
+# sole-search 프로필
+<사람이 읽는 한 줄 요약>
+```
+
+**소상공인 법적 판정 우선순위**: ① 유효한 소상공인확인서 → 확정 ② 법령상 기준기간
+평균매출액(statutory_average) 근거가 있으면 상시근로자 기준(업종별 5인/10인 미만)과
+평균매출액 기준을 함께 판정 ③ **최근 1년 근사치(recent_year_proxy)만 있으면 below라도
+법적 지위는 '확인 필요'** — 이전 연도 매출 때문에 법령상 평균이 기준을 넘을 수 있다.
+
+**개인정보 최소화**: 세금 체납·대출액·신용점수는 묻지 않는다. 정책자금 후보가 나온 뒤
+"이 요건 해당되세요?"로만 확인하고, 답을 프로필에 저장하지 않는다. 출생연월도 저장하지 않는다.
+
+## 재조사 (diff 모드)
+
+프로필의 `last_survey_dir`가 있으면 전수 재검토 대신 증분 조사:
+
+1. **직전과 같은 소스 구성으로** 1단계 크롤링을 그대로 실행 (새 보고서 폴더에)
+2. 비교:
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/diff_surveys.py" \
+       <직전_폴더> <새_폴더> --out new_items.jsonl \
+       --old-profile <직전 프로필 사본> --new-profile sole-profile.md
+   ```
+3. 검토·상세검증은 `new_items.jsonl`(NEW+CHANGED)만. UNCHANGED는 직전 판정 승계.
+   단 **프로필 fingerprint가 바뀌었다는 WARNING이 나오면 전체 재판정**
+4. **정책자금(loan) 전체와 직전 `확인됨` 항목은 diff 결과와 무관하게 접수상태를 재확인**
+5. 보고서: 신규 / 변경(마감·조건 — changed_fields 표기) / 소멸된 확인됨 항목(기회 소멸 알림) / 승계 요약.
+   WARNING(미갱신 소스)은 coverage_manifest에 "미갱신" 명시
+
+## 1단계 — 수집
+
+```bash
+mkdir -p survey-$(date +%Y%m%d)/details && cd survey-$(date +%Y%m%d)
+
+# 소상공인24: 소진공 공고 + 통합조회(지자체·유관기관 포함) — 필수
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/sbiz_crawl.py" list all -o sbiz24.jsonl
+
+# 기업마당: 모집중 전체 전 페이지 (~96p, 2~3분) — 필수
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/sources_crawl.py" list -o bizinfo.jsonl
+```
+
+stderr의 `TOTAL/COLLECTED/DUPLICATES`·`PAGES/CRAWLED`를 기록한다 — coverage_manifest 재료다.
+종료 코드 2는 부분 수집(partial)이다. **소스별 계약·수동확인 절차는 `references/sources.md`**,
+지역신보·지자체 포털은 `references/region-registry.md` 참조.
+
+**중복 제거**: ① `(발행기관, 공고번호)` ② 정규화 canonical URL — 특히 sbiz24_combine의
+`PBLN_*` ID는 bizinfo의 pblancId와 같은 공고다 ③ 제목+기관+접수기간 전부 일치.
+애매하면 삭제하지 말고 묶어서 "동일 사업 추정 N건"으로 표기.
+
+## 1.5단계 — 전수 선별 (screening)
+
+100% 수집해도 일부만 읽으면 전수조사가 아니다:
+
+- 수집된 **모든** 레코드를 배치(예: 100건씩)로 나눠 빠짐없이 읽는다. 제목 키워드로 자동 제외 금지
+- 각 레코드에 `screening: candidate | excluded | needs_detail` + 제외 사유를 붙여 `screening.jsonl`로 저장
+- 프로필의 needs·업종·지역과 명백히 무관해도 "excluded + 사유"로 기록하고 넘어간다 (조용히 버리지 않는다)
+- 중단되면 어디까지 검토했는지 기록하고 coverage를 partial로 보고
+
+## 2단계 — 자격 판정
+
+candidate와 needs_detail 레코드는 상세 원문을 확인한다:
+
+```bash
+# 소상공인24 상세+첨부 (첨부 PDF 자동 다운로드)
+python3 ".../scripts/sbiz_crawl.py" detail <pbancSn> --download-dir details -o details/<pbancSn>.json
+# 기업마당 상세
+python3 ".../scripts/sources_crawl.py" detail "<URL>" -o details
+# 첨부 텍스트 추출 (HWP는 실패가 정상 — 그 후보는 '확인 필요')
+python3 ".../scripts/attach_extract.py" details/<파일> -o details/<파일>.txt
+```
+
+판정 상태 5단계:
+
+| 상태 | 의미 |
+|---|---|
+| `확인됨` | 공고 원문(첨부 포함)에서 모든 필수 신청자격 충족 확인 |
+| `조건부` | 구체 요건 충족 시 가능 (예: 교육 이수 후) — 요건 명시 |
+| `확인 필요` | 프로필 또는 원문 부족 — 부족한 항목 명시 |
+| `신청 불가` | 필수요건 불충족 — 근거 문구 인용 |
+| `사업전환 후보` | 실제 사업전환 전제 — 별도 섹션, 기본 비표시 |
+
+검증 축: 업종 제한(제외 업종), 업력(공고 기준일로 산정), 상시근로자 수, 매출액 기준,
+소재지(본점/사업장 구분), 기수혜 제외, 영업상태.
+
+규칙:
+- **첨부를 읽지 못한 후보는 `확인됨` 금지** → `확인 필요` + "첨부 미확인(사유)"
+- 각 판정에 근거 출처(문서·문구)를 기록
+- `확인됨` = 공고상 신청자격 확인일 뿐, 선정·대출심사 통과 예측이 아님 — 보고서에 명시
+- 연락처는 `contacts: [{kind: phone|email|url, value}]`, 없으면 "연락처 미기재"
+- 유형은 `primary_type`(grant|loan|advisory) + tags. loan에는 한도·금리(기준일)·기간·
+  거치·상환방식·보증기관을 채우고, 회차 접수상태는 sources.md의 수동확인 절차를 따른다
+
+## 3단계 — 보고서
+
+`survey-YYYYMMDD/report.md`. 사장님이 읽는 문서 — 관공서 용어에 괄호 해설. 구조:
+
+1. **오늘 신청할 것** — 전 유형 통합 `확인됨` 목록. 정렬: 마감 D-day 오름차순 →
+   예산소진 시까지("서두르세요") → 상시 → 회차예정(예정일). 각 항목: 제목, 한 줄 요약,
+   금액/혜택, 마감, 신청 방법·링크, 연락처
+2. **coverage_manifest** — 소스별 `collection_status`와 `screening_status`
+   (`success|partial|failed|manual`), collected/screened/candidate/detail_verified 카운트.
+   partial·manual·미갱신은 사유 명시. **partial인 소스를 "전수 수집 완료"로 표현 금지**.
+   미커버 영역(미등록 지자체 포털 등) 한계 고지
+3. **유형별 상세** — 💰 받는 돈 / 🏦 빌리는 돈 / 🎓 배우고 돕기 순, 각 유형 안에서 판정 상태순.
+   🏦에는 "갚아야 하는 돈입니다" 문구 + 한도·금리(기준일)·기간·취급기관 필수
+4. **사업전환 후보** — 해당 시에만
+
+완료 후 프로필의 `last_survey_at`·`last_survey_dir`를 갱신한다.
+
+## 중단선
+
+403·CAPTCHA·로그인 요구를 만나면 우회(TLS 지문 변경, 내부 API 반복 재시도)하지 않는다.
+해당 소스를 manual로 전환하고 sources.md의 수동확인 절차를 보고서에 첨부한다.

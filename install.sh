@@ -61,7 +61,7 @@ elif [ ! -e "${SKILL_DIR}" ]; then
   fi
 fi
 
-# Dependency: curl_cffi (TLS-fingerprint evasion for the crawlers)
+# Optional dependency: curl_cffi (안정적 fetch용 — 없어도 urllib로 동작)
 if python3 -c 'import curl_cffi' >/dev/null 2>&1; then
   log "✓ curl_cffi 이미 설치됨"
 elif pip3 install 'curl_cffi>=0.15' >/dev/null 2>&1 \
@@ -75,4 +75,4 @@ if [ "${INSTALLED}" -eq 0 ]; then
   warn "설치된 호스트가 없습니다. 지원 호스트: Claude Code·Codex·agy·Gemini CLI·Cursor·Grok Build (README 참조)"
   exit 1
 fi
-log "완료 — 새 세션에서 '지원사업 전수조사 해줘'로 사용하세요."
+log "완료 — 새 세션에서 '우리 가게 지원사업 찾아줘'로 사용하세요."
