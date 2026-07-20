@@ -22,3 +22,7 @@ sole-profile.md
 # 로컬 도구
 .playwright-mcp/
 scratch/
+
+# 로컬 전용 (히스토리에서 제거됨)
+docs/
+tests/
