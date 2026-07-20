@@ -65,7 +65,7 @@ owner_gender: female | male | unspecified
 needs: [grant, loan, facility, online_sales, marketing, education, recovery]
 last_survey_at: YYYY-MM-DD
 last_survey_dir: <보고서 폴더>
-survey_sources: [sbiz24, sbiz24_combine, bizinfo]
+survey_sources: [sbiz24, sbiz24_combine, bizinfo, fanfandaero]  # 서울이면 + seoulshinbo
 ---
 # sole-search 프로필
 <사람이 읽는 한 줄 요약>
@@ -109,7 +109,20 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/sbiz_crawl.py" list al
 
 # 기업마당: 모집중 전체 전 페이지 (~96p, 2~3분) — 필수
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/sources_crawl.py" list -o bizinfo.jsonl
+
+# 판판대로: 온라인판로 사업목록 + 세부·수시 모집공고 게시판 — 권장
+#   (--since: 첫 조사는 1년 전, 재조사는 직전 조사일)
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/region_crawl.py" list fanfan \
+    -o fanfandaero.jsonl --since <YYYY-MM-DD>
+
+# 서울신보: 프로필 province가 서울일 때만 — 권장 (서울시 사업 공고 원출처)
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/region_crawl.py" list seoulshinbo \
+    -o seoulshinbo.jsonl --since <YYYY-MM-DD>
 ```
+
+게시판형 소스(판판대로 공지·서울신보)는 접수기간이 목록에 없어 status가 `불명`으로
+수집된다 — 선별에서 제목·게시일로 1차 거르고, candidate는 상세에서 접수 여부를 확인한다.
+`--since` 컷오프를 쓴 조사는 coverage_manifest에 컷오프 날짜를 명시한다 (전수 아님을 표기).
 
 stderr의 `TOTAL/COLLECTED/DUPLICATES`·`PAGES/CRAWLED`를 기록한다 — coverage_manifest 재료다.
 종료 코드 2는 부분 수집(partial)이다. **소스별 계약·수동확인 절차는 `references/sources.md`**,
@@ -142,6 +155,8 @@ python3 ".../scripts/sbiz_crawl.py" detail <pbancSn> --download-dir details \
     -o details/<pbancSn>.json --merge-into sbiz24.jsonl
 # 기업마당 상세 (본문 해시·첨부 링크를 목록에 병합)
 python3 ".../scripts/sources_crawl.py" detail "<URL>" -o details --merge-into bizinfo.jsonl
+# 판판대로·서울신보 상세 (canonical_url로 소스 자동 판별, 소스별 jsonl에 병합)
+python3 ".../scripts/region_crawl.py" detail "<canonical_url>" -o details --merge-into <해당소스>.jsonl
 # 첨부 텍스트 추출 (HWP는 실패가 정상 — 그 후보는 '확인 필요')
 python3 ".../scripts/attach_extract.py" details/<파일> -o details/<파일>.txt
 ```

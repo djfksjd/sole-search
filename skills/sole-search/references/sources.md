@@ -88,12 +88,58 @@ bizType(유관기관지원사업 등, 통합조회), pbancId(통합조회), hstg
 항목에 "회차 접수상태는 ols.semas.or.kr 또는 ☎1357에서 확인" 문구를 필수 표기하고
 coverage_manifest에 `semas_loan_status: manual`로 기록한다.
 
-## 4. 지역신용보증재단 — 지역 레지스트리 (manual)
+## 4. 지역신용보증재단 — 지역 레지스트리 (서울=자동, 그 외 manual)
 
-17개 지역재단은 `region-registry.md` 참조. 초기 릴리스는 전체 `manual`:
-프로필의 시·도에 해당하는 재단 URL과 확인 절차를 보고서에 첨부한다.
+17개 지역재단은 `region-registry.md` 참조. **서울신보는 자동화 검증 완료(§7)** —
+프로필 province가 서울이면 `region_crawl.py list seoulshinbo`로 수집한다.
+그 외 16개 재단은 `manual`: 재단 URL과 확인 절차를 보고서에 첨부한다.
 
 ## 5. 지자체·경제진흥원 포털 — 지역 레지스트리 (manual, 한계 고지)
 
 기업마당·소상공인24 통합조회가 지자체 공고 상당수를 커버하지만 전부는 아니다.
 미등록 지역 포털은 보고서 한계 섹션에 명시한다. `region-registry.md`의 주요 광역 URL 참조.
+
+## 6. 판판대로 (fanfandaero.kr) — 권장, 자동화 검증 완료 (2026-07-20)
+
+소진공 중소기업유통센터의 온라인판로 포털. **대표 공고는 sbiz24/bizinfo에도 실리지만
+세부·수시 모집(메뉴판 사업 세부공고, 소담스퀘어·홈쇼핑 회차 모집)은 여기에만 게시**되는
+경우가 많다 — 실전조사에서 '확인 필요' 판정의 확인처가 대부분 이 사이트였다.
+
+- robots.txt: Googlebot의 `/search.do`만 제한 — 일반 크롤 허용 (검증 2026-07-20)
+- 사업 목록: `POST /portal/v2/selectSupportInfoListAjax.do` (무인증 JSON,
+  body `sprtBizTyCd=&sprtBizYr=<연도>`; 빈 연도 → 기본 연도, 응답 `years`로 전 연도 순회)
+  → `sprtBizCd, sprtBizNm, sprtBizTyNm(유형), sprtBizTrgtNm(대상), rcritBgngYmd/rcritEndYmd(모집기간)`
+- 공지사항 게시판(세부·수시 모집공고): `POST /portal/v2/readUcenterNtcBbs.do`
+  body `pageIndex=N` (10건/페이지, `totalRecordCount` 마커로 총건수 검증),
+  행 `detailPage('nttId')` + `span.date`. 상세 `readUcenterNtcBbsView.do?nttId=`
+- 첨부: 상세의 `download.do?fileName=...` 직링크 (뷰어 호출 인자에서 추출)
+- 실행: `region_crawl.py list fanfan -o fanfandaero.jsonl [--since YYYY-MM-DD]`
+  게시판 레코드는 접수기간이 목록에 없어 status `불명` → 상세 확인 대상
+- 중복: 대표 공고는 sbiz24/bizinfo와 제목+기관 기준 교차 중복 제거
+
+## 7. 서울신용보증재단 (seoulshinbo.co.kr) — 서울 프로필 권장, 자동화 검증 완료 (2026-07-20)
+
+서울시 소상공인 지원사업의 실집행 기관. 고용보험료·산재보험료 지원, 자영업클리닉,
+폐업지원, 프렙 아카데미 등 **서울시 사업 공고의 원출처**다.
+
+- robots.txt: Googlebot 한정 제한(`User-agent: *` 규칙 없음) — 일반 크롤 허용 (검증 2026-07-20)
+- TLS: 서버가 중간 인증서를 체인에 안 실어줌 → `region_crawl.py`가 DigiCert 중간 인증서를
+  내장해 **검증 유지** (검증 비활성화 아님)
+- 목록: `GET /wbase/contents/bbs/list.do?mng_cd=STRY9788&pageIndex=N`
+  (공지사항 게시판이 지원사업 공고 게시판. 'STRY0006 사업공고'는 입찰·행정 위주라 수집 제외)
+  행 `bbs.goView('page','bno')` + 부서·날짜 td. 페이지당 신규 10건 + 상단고정 반복분
+- 상세: `GET /wbase/contents/bbs/view/{bno}.do?mng_cd=STRY9788`
+- 첨부: `common.download(bno,'serial')` → `GET /download/{bno}/{serial}.do?mng_cd=STRY9788`
+- 실행: `region_crawl.py list seoulshinbo -o seoulshinbo.jsonl --since <컷오프>`
+  **게시판이 수년치 누적(수백 페이지)이라 --since 지정을 권장** (전수는 10분 이상 소요)
+
+## 8. 크롤 제외 판정 (2026-07-20 robots 검증)
+
+아래는 robots.txt가 수집을 불허해 **크롤하지 않는다** (우회 금지 원칙). 재검토 시 robots부터 재확인.
+
+| 사이트 | 판정 근거 |
+|---|---|
+| seoulsbdc.or.kr (서울시 자영업지원센터) | `User-agent: * Disallow: /` 전면 불허 |
+| ggbaro.kr (경기바로) | `User-agent: * Disallow: /` 전면 불허 |
+| gmr.or.kr (경기도시장상권진흥원) | `/base/board*` 불허 (공고 게시판) |
+| gov.kr 보조금24 | 사실상 전면 불허 + 오픈 API는 키 필수 (선택 소스 후보로만 유보) |
