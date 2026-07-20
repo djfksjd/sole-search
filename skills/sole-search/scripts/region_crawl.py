@@ -339,17 +339,38 @@ def merge_detail(jsonl_path, source, source_id, content_hash, attachments, compl
 
 
 def detail_target(url):
-    """url → (source, source_id, 본문 컨테이너 regex, 첨부 추출 함수)"""
+    """url → (source, source_id, 본문 시작 마커 regex, 첨부 추출 함수)"""
     if "fanfandaero.kr" in url:
         m = re.search(r"nttId=(\d+)", url) or re.search(r"sprtBizCd=(\d+)", url)
         kind = "ntc" if "nttId=" in url else "biz"
         return ("fanfandaero", f"{kind}-{m.group(1)}" if m else None,
-                r'<div[^>]+class="[^"]*contents[^"]*"[\s\S]*?</div>', fanfan_attachments)
+                r'<div[^>]+class="[^"]*contents[^"]*"', fanfan_attachments)
     if "seoulshinbo.co.kr" in url:
         m = re.search(r"/bbs/view/(\d+)\.do", url)
         return ("seoulshinbo", f"ntc-{m.group(1)}" if m else None,
-                r'<div[^>]+class="[^"]*sub_cont_wrap[^"]*"[\s\S]*?</div>', ssb_attachments)
+                r'<div[^>]+class="[^"]*sub_cont_wrap[^"]*"', ssb_attachments)
     return (None, None, None, None)
+
+
+# 본문 끝 마커 — 컨테이너 div를 regex로 균형 매칭할 수 없으므로(중첩)
+# 시작 마커부터 푸터/다음글 내비게이션까지를 본문으로 자른다
+END_MARKERS = (r'<div[^>]+id="footer"', r'<footer\b', r'<div[^>]+class="[^"]*footer',
+               r'다음글|이전글')
+
+
+def extract_body(h, start_pattern):
+    """시작 마커 ~ 첫 끝 마커 구간의 텍스트. 마커를 못 찾으면 전체 폴백."""
+    sm = re.search(start_pattern, h)
+    seg = h[sm.start():] if sm else h
+    ends = [m.start() for p in END_MARKERS for m in [re.search(p, seg)] if m]
+    if ends:
+        seg = seg[:min(ends)]
+    text = strip_html(seg)
+    # 조회수·등록일시각 등 변동 라인은 해시 안정성을 위해 제거
+    lines = [ln for ln in text.splitlines()
+             if ln.strip() and not re.fullmatch(r"\s*(조회수?|등록일|작성일)\s*", ln)
+             and not re.fullmatch(r"\s*\d{1,7}\s*", ln)]
+    return "\n".join(lines)
 
 
 def fanfan_attachments(h, url):
@@ -395,7 +416,7 @@ def cmd_detail(args):
     os.makedirs(args.output, exist_ok=True)
     failures = 0
     for url in args.urls:
-        source, sid, container, attach_fn = detail_target(url)
+        source, sid, start_pat, attach_fn = detail_target(url)
         if not source or not sid:
             print(f"[sole-search] skip 알 수 없는 url: {url[:70]}", file=sys.stderr)
             failures += 1
@@ -410,8 +431,7 @@ def cmd_detail(args):
             failures += 1
             time.sleep(args.delay)
             continue
-        body_m = re.search(container, h)
-        text = strip_html(body_m.group(0) if body_m else h)
+        text = extract_body(h, start_pat)
         digest = hashlib.sha256(text.encode()).hexdigest()
         attachments = attach_fn(h, url)
         name = re.sub(r"\W+", "_", f"{source}_{sid}")[:80]
