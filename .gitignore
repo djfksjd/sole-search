@@ -1,12 +1,24 @@
+# Python
 __pycache__/
 *.pyc
+.pytest_cache/
+.venv/
+
+# OS / editors
 .DS_Store
+.idea/
+.vscode/
+
+# 조사 산출물 (사용자 프로젝트 폴더에 생성되는 것 — 리포에 커밋 금지)
 *.jsonl
+!tests/fixtures/*.jsonl
 details/
 output/
-evals/
+survey-*/
+screening.jsonl
+sole-profile.md
 *-workspace/
 
+# 로컬 도구
 .playwright-mcp/
-ir-search-profile.md
 scratch/
