@@ -35,6 +35,8 @@ PROFILE_FIELDS = ["entity_type", "business_status", "closure_date", "industry_te
 
 
 SKIP_FILES = {"screening.jsonl", "new_items.jsonl"}
+# 에이전트가 조사 폴더에 만드는 작업 파일 — 수집 원본이 아니므로 로드하지 않는다
+SKIP_PREFIXES = ("screening", "verdicts", "judge_input", "merged", "new_items")
 
 
 def load_dir(path):
@@ -42,7 +44,8 @@ def load_dir(path):
     records = {}
     sources = set()
     for f in sorted(glob.glob(os.path.join(path, "*.jsonl"))):
-        if os.path.basename(f) in SKIP_FILES:
+        base = os.path.basename(f)
+        if base in SKIP_FILES or base.startswith(SKIP_PREFIXES):
             continue
         for ln, line in enumerate(open(f, encoding="utf-8"), 1):
             line = line.strip()
@@ -51,6 +54,8 @@ def load_dir(path):
             r = json.loads(line)
             if "kind" in r and "record" in r:
                 continue  # 이전 diff 산출물 혼입 방어
+            if "screening" in r and "title" not in r:
+                continue  # 선별 작업 파일 혼입 방어
             src, sid = r.get("source"), r.get("source_id")
             if not src or sid in (None, "", "None"):
                 print(f"ERROR: {f}:{ln} source/source_id 누락 — 스키마 위반", file=sys.stderr)
