@@ -421,6 +421,15 @@ def cmd_detail(args):
             print(f"[sole-search] skip 알 수 없는 url: {url[:70]}", file=sys.stderr)
             failures += 1
             continue
+        if sid.startswith("biz-"):
+            # 판판대로 사업 상세는 JS 렌더라 정적 수집 불가(2026-07-20 검증,
+            # 전용 AJAX 없음). 목록 JSON 필드가 전부이며 세부 공고문은 공지
+            # 게시판(ntc-*)에 실린다 — 조용히 잘못된 해시를 만들지 않는다.
+            print(f"[sole-search] SKIP {sid}: biz 상세는 정적 수집 미지원 — "
+                  "목록 필드로 판정하고 세부는 게시판 공고(ntc)를 참조할 것",
+                  file=sys.stderr)
+            failures += 1
+            continue
         try:
             h = fetch(url)
         except ManualEscalation as e:

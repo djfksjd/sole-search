@@ -115,6 +115,9 @@ coverage_manifest에 `semas_loan_status: manual`로 기록한다.
 - 첨부: 상세의 `download.do?fileName=...` 직링크 (뷰어 호출 인자에서 추출)
 - 실행: `region_crawl.py list fanfan -o fanfandaero.jsonl [--since YYYY-MM-DD]`
   게시판 레코드는 접수기간이 목록에 없어 status `불명` → 상세 확인 대상
+- **biz-\* 사업 상세는 정적 수집 미지원** (JS 렌더, 전용 AJAX 없음 — 2026-07-20 검증):
+  목록 JSON 필드(모집기간·대상·유형)로 판정하고, 세부 공고문은 게시판(ntc-\*) 공고를
+  참조한다. `detail`에 biz URL을 넘기면 SKIP 경고 후 실패 카운트
 - 중복: 대표 공고는 sbiz24/bizinfo와 제목+기관 기준 교차 중복 제거
 
 ## 7. 서울신용보증재단 (seoulshinbo.co.kr) — 서울 프로필 권장, 자동화 검증 완료 (2026-07-20)
