@@ -56,8 +56,15 @@ Korea-only. Reports are written in Korean for shop owners, with bureaucratic ter
 
 ## Coverage & limits
 
-- Automated: Sbiz24 (SEMAS announcements + integrated feed incl. local governments) and all
-  open Bizinfo listings. "Exhaustive" means exhaustive **within these declared sources**.
+- Automated: Sbiz24 (SEMAS announcements + integrated feed incl. local governments), all
+  open Bizinfo listings, Fanfandaero (online sales-channel sub-announcements), and Seoul
+  Credit Guarantee Foundation board (Seoul profiles). "Exhaustive" means exhaustive
+  **within these declared sources**.
+- Optional: Bojogeum24 (gov.kr always-on benefit programs, ~11k services) via the free
+  data.go.kr open API. Apply for "대한민국 공공서비스(혜택) 정보" (dataset 15113968,
+  auto-approved), then store the key in `~/.config/sole-search/api_key` or the
+  `DATA_GO_KR_API_KEY` env var. Without a key the source is reported as inactive —
+  everything else works normally. See the Korean README for a step-by-step guide.
 - Manual-guidance only: per-round policy-loan intake status (ols), regional credit guarantee
   foundations, non-federated local portals — see `skills/sole-search/references/region-registry.md`.
 - Binary HWP attachments cannot be auto-extracted (HWPX/PDF can); affected candidates are
