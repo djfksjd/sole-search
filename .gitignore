@@ -19,6 +19,13 @@ screening.jsonl
 sole-profile.md
 *-workspace/
 
+# API 키·비밀 (보조금24 등 — 어떤 형태로든 커밋 금지)
+api_key
+*.key
+.env
+.env.*
+secrets/
+
 # 로컬 도구
 .playwright-mcp/
 scratch/

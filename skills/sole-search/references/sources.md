@@ -142,4 +142,26 @@ coverage_manifest에 `semas_loan_status: manual`로 기록한다.
 | seoulsbdc.or.kr (서울시 자영업지원센터) | `User-agent: * Disallow: /` 전면 불허 |
 | ggbaro.kr (경기바로) | `User-agent: * Disallow: /` 전면 불허 |
 | gmr.or.kr (경기도시장상권진흥원) | `/base/board*` 불허 (공고 게시판) |
-| gov.kr 보조금24 | 사실상 전면 불허 + 오픈 API는 키 필수 (선택 소스 후보로만 유보) |
+| gov.kr 보조금24 | 사실상 전면 불허 — **크롤 대신 오픈 API 선택 소스로 지원 (§9)** |
+
+## 9. 보조금24 오픈 API — 선택 소스, 계약 검증 완료 (2026-07-20)
+
+행안부 "대한민국 공공서비스(혜택) 정보" (data.go.kr/data/15113968). gov.kr은 robots가
+크롤을 불허하므로 API가 유일한 원칙적 경로다. **키가 있어야 동작하는 선택 소스**:
+
+- 커버리지 갭: sbiz24/bizinfo의 "모집 공고"와 달리 **상시 수혜 제도**(요금감면·수당·
+  지자체 소규모 혜택) 중심 — 겹침이 아니라 보완
+- 활성화(무료·자동승인): data.go.kr 활용신청 → 키를 환경변수 `DATA_GO_KR_API_KEY`
+  또는 `~/.config/sole-search/api_key`에 저장. **프로필·보고서 폴더·리포에 저장 금지**
+- 엔드포인트: `https://api.odcloud.kr/api/gov24/v3/{serviceList,serviceDetail,supportConditions}`
+  page/perPage 페이지네이션, 응답 `{page,perPage,totalCount,currentCount,data:[...]}`.
+  필드는 한글명(서비스ID/서비스명/신청기한/지원대상/지원내용/소관기관명...) —
+  크롤러가 v1(SVC_ID)/v3(서비스ID) 변형 모두 수용, 첫 페이지에서 필드 검증 실패 시 fail-closed
+- 실행: `gov24_crawl.py list -o gov24.jsonl --filter-target 소상공인`
+  (서버측 cond 필터는 신뢰성 미검증 — 클라이언트측 키워드 필터 사용, MATCHED 카운트 보고)
+- **종료 코드 4 = 미활성(키 미등록)**: coverage_manifest에
+  `gov24: 미활성(선택 소스, API 키 미등록)`으로 기록하고 보고서 한계 섹션에 활성화 방법 안내.
+  키 인증 실패는 2(failed)로 구분 — "키 확인 필요" 명시
+- 신청기한이 자유 텍스트라 status는 상시/접수중/마감/불명만 확정 판정.
+  **보고서에서 상시 제도는 "상시 혜택(보조금24)" 별도 섹션** — 마감 정렬 목록과 섞지 않는다
+- 트래픽 상한: 개발계정 10,000/일 — 전량 수집(약 7,500건, perPage 500 = 15요청)도 여유

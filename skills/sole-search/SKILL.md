@@ -65,7 +65,7 @@ owner_gender: female | male | unspecified
 needs: [grant, loan, facility, online_sales, marketing, education, recovery]
 last_survey_at: YYYY-MM-DD
 last_survey_dir: <보고서 폴더>
-survey_sources: [sbiz24, sbiz24_combine, bizinfo, fanfandaero]  # 서울이면 + seoulshinbo
+survey_sources: [sbiz24, sbiz24_combine, bizinfo, fanfandaero]  # 서울이면 + seoulshinbo, API 키 등록 시 + gov24
 ---
 # sole-search 프로필
 <사람이 읽는 한 줄 요약>
@@ -118,11 +118,22 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/region_crawl.py" list 
 # 서울신보: 프로필 province가 서울일 때만 — 권장 (서울시 사업 공고 원출처)
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/region_crawl.py" list seoulshinbo \
     -o seoulshinbo.jsonl --since <YYYY-MM-DD>
+
+# 보조금24: 선택 소스 (API 키 등록 시에만 — 상시 수혜 제도 커버)
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/gov24_crawl.py" list \
+    -o gov24.jsonl --filter-target 소상공인
 ```
 
 게시판형 소스(판판대로 공지·서울신보)는 접수기간이 목록에 없어 status가 `불명`으로
 수집된다 — 선별에서 제목·게시일로 1차 거르고, candidate는 상세에서 접수 여부를 확인한다.
 `--since` 컷오프를 쓴 조사는 coverage_manifest에 컷오프 날짜를 명시한다 (전수 아님을 표기).
+
+**보조금24는 선택 소스**: 종료 코드 4(미활성)면 coverage_manifest에
+`미활성(선택 소스, API 키 미등록)`으로 기록하고 보고서 한계에 활성화 방법
+(data.go.kr 15113968 활용신청 → `DATA_GO_KR_API_KEY` 또는 `~/.config/sole-search/api_key`)을
+한 줄 안내한다. 활성 시 상시 제도는 보고서에 **"상시 혜택(보조금24)" 별도 섹션**으로
+다룬다 — 마감 기준 정렬인 "오늘 신청할 것"과 섞지 않는다. 키를 프로필·보고서 폴더에
+저장하지 않는다.
 
 stderr의 `TOTAL/COLLECTED/DUPLICATES`·`PAGES/CRAWLED`를 기록한다 — coverage_manifest 재료다.
 종료 코드 2는 부분 수집(partial)이다. **소스별 계약·수동확인 절차는 `references/sources.md`**,
