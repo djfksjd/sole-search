@@ -20,8 +20,8 @@
 - **Incremental re-survey** — diff mode reports only new/changed/expired items; changing your
   profile invalidates carried-over verdicts
 
-Crawlers use the Python standard library only (`curl_cffi` optional). Collection is rule-based;
-all judgment is done by the LLM agent.
+Crawlers use the Python standard library only, with a minimum 0.5 s delay between requests.
+Collection is rule-based; all judgment is done by the LLM agent.
 
 ## Install
 
@@ -32,24 +32,39 @@ curl -fsSL https://raw.githubusercontent.com/djfksjd/sole-search/main/install.sh
 Detects Claude Code / Codex / agy / Gemini CLI; falls back to `~/.agents/skills/sole-search`
 for file-based hosts (Cursor etc.).
 
-## Usage
+## Quick start
 
-In a fresh session:
+1. Open a fresh session in a dedicated folder (survey data and reports are written there):
 
-- "우리 가게에 맞는 지원사업 찾아줘" (find support programs for my shop) — a short, plain-language
-  interview builds `sole-profile.md`, then the full survey runs
-- "소상공인 정책자금 알아봐줘" — includes policy loans/guarantees
-- "지난번 이후 새로 나온 거 있어?" — incremental diff mode
+   ```bash
+   mkdir -p ~/my-shop && cd ~/my-shop && claude
+   ```
+
+2. Say **"우리 가게에 맞는 지원사업 찾아줘"** (find support programs for my shop).
+3. First run only: answer a short plain-language interview (6–9 questions — what you sell,
+   district, registration date, employees, revenue band, what you need). Answers are saved
+   to `sole-profile.md`; you can also inline them in your first message to skip the interview.
+4. Wait ~2–3 min of crawling (~1,700 Sbiz24 + ~1,400 Bizinfo records), then screening and
+   verification produce `survey-YYYYMMDD/report.md`: ① apply-today list ② coverage_manifest
+   ③ grants / loans / education ④ pivot candidates.
+5. Later, ask **"지난번 이후 새로 나온 거 있어?"** (anything new since last time?) for an
+   incremental diff — only new / changed (rate, deadline) / expired items are re-verified.
+
+See the Korean README for a sample report excerpt, the profile schema, and FAQ.
 
 Korea-only. Reports are written in Korean for shop owners, with bureaucratic terms explained.
 
-## Development
+## Coverage & limits
 
-```bash
-python3 -m pytest tests/   # fixture-based golden tests, no network needed
-```
-
-Design spec: `docs/superpowers/specs/` · Implementation plan: `docs/superpowers/plans/`
+- Automated: Sbiz24 (SEMAS announcements + integrated feed incl. local governments) and all
+  open Bizinfo listings. "Exhaustive" means exhaustive **within these declared sources**.
+- Manual-guidance only: per-round policy-loan intake status (ols), regional credit guarantee
+  foundations, non-federated local portals — see `skills/sole-search/references/region-registry.md`.
+- Binary HWP attachments cannot be auto-extracted (HWPX/PDF can); affected candidates are
+  reported as Needs-check with the source link. Blocked crawls (403/CAPTCHA) are never
+  circumvented — the source switches to a documented manual procedure.
+- The skill verifies **application eligibility only**; it does not predict selection or loan
+  approval. Calling the intake office for final confirmation is recommended.
 
 ## License
 
