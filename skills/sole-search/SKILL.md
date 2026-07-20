@@ -90,10 +90,13 @@ survey_sources: [sbiz24, sbiz24_combine, bizinfo]
        <직전_폴더> <새_폴더> --out new_items.jsonl \
        --old-profile <직전 프로필 사본> --new-profile sole-profile.md
    ```
-3. 검토·상세검증은 `new_items.jsonl`(NEW+CHANGED)만. UNCHANGED는 직전 판정 승계.
+3. 검토·상세검증은 `new_items.jsonl`(NEW+CHANGED+NEEDS_REHASH)만. UNCHANGED는 직전 판정 승계.
    단 **프로필 fingerprint가 바뀌었다는 WARNING이 나오면 전체 재판정**
-4. **정책자금(loan) 전체와 직전 `확인됨` 항목은 diff 결과와 무관하게 접수상태를 재확인**
-5. 보고서: 신규 / 변경(마감·조건 — changed_fields 표기) / 소멸된 확인됨 항목(기회 소멸 알림) / 승계 요약.
+4. **NEEDS_REHASH** = 직전 조사에 content_hash가 있었는데 새 목록엔 아직 없음. 목록 필드만으로
+   같아 보여도 본문·첨부가 바뀌었을 수 있으니 **상세 재수집(`detail --merge-into`) 후 해시를
+   채우고 재비교**한다 — 그때 같으면 승계, 다르면 변경 처리
+5. **정책자금(loan) 전체와 직전 `확인됨` 항목은 diff 결과와 무관하게 접수상태를 재확인**
+6. 보고서: 신규 / 변경(마감·조건 — changed_fields 표기) / 소멸된 확인됨 항목(기회 소멸 알림) / 승계 요약.
    WARNING(미갱신 소스)은 coverage_manifest에 "미갱신" 명시
 
 ## 1단계 — 수집

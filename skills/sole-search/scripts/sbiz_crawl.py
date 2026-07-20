@@ -239,6 +239,8 @@ def cmd_list(args):
         for mode in modes:
             try:
                 total, collected, fetched = crawl_list(mode, out, args.page_size, args.delay)
+            except ManualEscalation:
+                raise  # 차단 신호 — main에서 exit 3
             except RuntimeError as e:
                 print(f"WARNING {mode}: {e}", file=sys.stderr)
                 ok = False
@@ -266,21 +268,32 @@ def safe_filename(file_id, filename):
 
 def download_capped(url, path):
     req = urllib.request.Request(url, headers=HEADERS)
-    with urllib.request.urlopen(req, timeout=60) as r, open(path, "wb") as fh:
-        read = 0
-        while True:
-            chunk = r.read(1 << 20)
-            if not chunk:
-                return read
-            read += len(chunk)
-            if read > MAX_ATTACH_BYTES:
-                raise RuntimeError(f"첨부가 {MAX_ATTACH_BYTES // (1 << 20)}MB 상한 초과")
-            fh.write(chunk)
+    try:
+        with urllib.request.urlopen(req, timeout=60) as r, open(path, "wb") as fh:
+            length = r.headers.get("Content-Length")
+            if length and int(length) > MAX_ATTACH_BYTES:
+                raise RuntimeError(f"첨부 Content-Length가 상한 초과: {length}")
+            read = 0
+            while True:
+                chunk = r.read(1 << 20)
+                if not chunk:
+                    return read
+                read += len(chunk)
+                if read > MAX_ATTACH_BYTES:
+                    raise RuntimeError(f"첨부가 {MAX_ATTACH_BYTES // (1 << 20)}MB 상한 초과")
+                fh.write(chunk)
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            raise ManualEscalation(f"첨부 다운로드 HTTP {e.code}") from e
+        raise
+    except (RuntimeError, OSError):
+        path.unlink(missing_ok=True)  # 부분 파일 잔존 방지
+        raise
 
 
 def content_hash_of(body_text, attachment_hashes):
     payload = body_text + "\n" + "\n".join(sorted(attachment_hashes))
-    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+    return hashlib.sha256(payload.encode()).hexdigest()
 
 
 def cmd_detail(args):
@@ -291,27 +304,46 @@ def cmd_detail(args):
                                                     "tmprStrgYn": "N", "delYn": False}})
     detail["attachments"] = parse_files(files_data, args.pbanc_sn)
     attach_hashes = []
-    complete = True
     if args.download_dir:
+        import attach_extract  # 같은 디렉토리의 추출기 — 추출 성공까지 확인해야 complete
         d = pathlib.Path(args.download_dir).resolve()
         d.mkdir(parents=True, exist_ok=True)
         for f in detail["attachments"]:
             time.sleep(args.delay)
             path = (d / safe_filename(f["file_id"], f["filename"])).resolve()
-            if not str(path).startswith(str(d)):
-                f["download_error"] = "path_escape_blocked"
-                complete = False
+            if os.path.commonpath([str(path), str(d)]) != str(d) or path.is_symlink():
+                f["download_status"] = "failed"
+                f["extract_status"] = "failed"
+                f["extract_reason"] = "path_escape_blocked"
                 continue
             try:
                 download_capped(f["url"], path)
                 f["local_path"] = str(path)
-                attach_hashes.append(hashlib.sha256(path.read_bytes()).hexdigest()[:16])
+                f["download_status"] = "ok"
+                f["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
             except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError, OSError) as e:
-                f["download_error"] = str(e)
-                complete = False
+                f["download_status"] = "failed"
+                f["extract_status"] = "failed"
+                f["extract_reason"] = str(e)
                 print(f"WARNING attachment {f['filename']}: {e}", file=sys.stderr)
-    else:
-        complete = not detail["attachments"]  # 다운로드 안 했으면 첨부 존재 시 미완
+                continue
+            r = attach_extract.extract(str(path))
+            if r["ok"]:
+                f["extract_status"] = "ok"
+                text_path = str(path) + ".txt"
+                pathlib.Path(text_path).write_text(r["text"], encoding="utf-8")
+                f["text_path"] = text_path
+                attach_hashes.append(f["sha256"])
+            else:
+                f["extract_status"] = "unsupported" if r["reason"] in (
+                    "hwp_binary_unsupported", "unsupported_extension") else "failed"
+                f["extract_reason"] = r["reason"]
+                print(f"WARNING extract {f['filename']}: {r['reason']}", file=sys.stderr)
+    # complete = 첨부가 없거나, 모든 첨부의 추출까지 성공
+    complete = all(f.get("extract_status") == "ok" for f in detail["attachments"]) \
+        if detail["attachments"] else True
+    if not args.download_dir and detail["attachments"]:
+        complete = False  # 다운로드/추출 안 함
     detail["attachments_complete"] = complete
     detail["content_hash"] = content_hash_of(detail["body_text"], attach_hashes)
     if args.merge_into:
@@ -320,6 +352,7 @@ def cmd_detail(args):
         if not merged:
             print(f"WARNING: source_id={detail['source_id']} 레코드를 "
                   f"{args.merge_into}에서 못 찾음", file=sys.stderr)
+            return 2
     text = json.dumps(detail, ensure_ascii=False, indent=2)
     if args.output:
         open(args.output, "w", encoding="utf-8").write(text)
@@ -328,7 +361,7 @@ def cmd_detail(args):
     return 0
 
 
-def merge_detail(jsonl_path, source_id, content_hash, attachments, complete):
+def merge_detail(jsonl_path, source_id, content_hash, attachments, complete, source="sbiz24"):
     """목록 jsonl의 해당 레코드에 상세 검증 결과를 병합한다 (원자적 교체)."""
     tmp = jsonl_path + ".tmp"
     found = False
@@ -337,7 +370,7 @@ def merge_detail(jsonl_path, source_id, content_hash, attachments, complete):
             if not line.strip():
                 continue
             r = json.loads(line)
-            if str(r.get("source_id")) == str(source_id):
+            if r.get("source") == source and str(r.get("source_id")) == str(source_id):
                 r["content_hash"] = content_hash
                 r["attachments"] = attachments
                 r["attachments_complete"] = complete

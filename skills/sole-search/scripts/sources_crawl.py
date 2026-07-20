@@ -39,19 +39,31 @@ class ManualEscalation(RuntimeError):
     """401/403/CAPTCHA — 우회하지 않고 manual로 전환하라는 신호."""
 
 
-def fetch(url):
+def fetch(url, retries=3):
     req = urllib.request.Request(url, headers={"User-Agent": UA})
-    try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = resp.read().decode("utf-8", "replace")
-    except urllib.error.HTTPError as e:
-        if e.code in (401, 403):
-            raise ManualEscalation(f"HTTP {e.code} — 차단/인증 요구") from e
-        raise
-    low = body[:4000].lower()
-    if any(m in low for m in BLOCK_MARKERS):
-        raise ManualEscalation("차단/로그인 페이지 감지 (HTTP 200)")
-    return body
+    last = None
+    for i in range(retries):
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                body = resp.read().decode("utf-8", "replace")
+            low = body[:4000].lower()
+            if any(m in low for m in BLOCK_MARKERS):
+                raise ManualEscalation("차단/로그인 페이지 감지 (HTTP 200)")
+            return body
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                raise ManualEscalation(f"HTTP {e.code} — 차단/인증 요구") from e
+            last = e
+            if not (e.code == 429 or e.code >= 500):
+                break  # 그 외 4xx는 재시도 무의미
+            retry_after = e.headers.get("Retry-After") if e.headers else None
+            wait = float(retry_after) if retry_after and retry_after.isdigit() \
+                else MIN_DELAY * (i + 1) * 2
+            time.sleep(min(wait, 30))
+        except (urllib.error.URLError, TimeoutError) as e:
+            last = e
+            time.sleep(MIN_DELAY * (i + 1) * 2)
+    raise RuntimeError(f"GET {url[:80]} failed after {retries} tries: {last}")
 
 
 def clean(s):
@@ -131,6 +143,17 @@ def parse_bizinfo_page(h):
     return items, bool(items)
 
 
+def parse_total_count(h):
+    """전체 분야 탭(hashAll)의 총건수. 못 찾으면 None (coverage 검증 불가로 보고)."""
+    seg = re.search(r'분야\((\d[\d,]*)\) 공고보기"[^>]{0,120}id="hashAll"', h)
+    if not seg:
+        seg = re.search(r'id="hashAll"[^>]{0,200}?분야\((\d[\d,]*)\)', h)
+    if not seg:
+        counts = [int(c.replace(",", "")) for c in re.findall(r'분야\((\d[\d,]*)\) 공고보기', h)]
+        return max(counts) if counts else None
+    return int(seg.group(1).replace(",", ""))
+
+
 def last_page(h):
     pages = [int(p) for p in re.findall(r"cpage=(\d+)", h)]
     return max(pages) if pages else 0  # 0 = 페이지네이션 미발견(실패 신호)
@@ -189,13 +212,19 @@ def cmd_list(args):
         else:
             try:
                 h = fetch(build_list_url(page))
-            except (ManualEscalation, urllib.error.URLError, TimeoutError) as e:
+            except ManualEscalation:
+                raise  # 차단 신호는 partial로 강등하지 않는다 — main에서 exit 3
+            except (RuntimeError, urllib.error.URLError, TimeoutError) as e:
                 print(f"WARNING bizinfo p{page}: {e}", file=sys.stderr)
                 return [], False
         crawled_pages = page
         return parse_bizinfo_page(h)
 
-    items = collect_all_pages(fetch_page, max_page=expected_pages, delay=args.delay)
+    try:
+        items = collect_all_pages(fetch_page, max_page=expected_pages, delay=args.delay)
+    except ManualEscalation as e:
+        print(f"MANUAL bizinfo: {e} — 수동확인으로 전환", file=sys.stderr)
+        return 3
 
     tmp = args.output + ".tmp"
     with open(tmp, "w", encoding="utf-8") as f:
@@ -203,16 +232,25 @@ def cmd_list(args):
             f.write(json.dumps(i, ensure_ascii=False) + "\n")
     os.replace(tmp, args.output)
 
-    print(f"PAGES {expected_pages} CRAWLED {crawled_pages} COLLECTED {len(items)}",
-          file=sys.stderr)
+    expected_items = parse_total_count(first)
+    print(f"PAGES {expected_pages} CRAWLED {crawled_pages} "
+          f"EXPECTED {expected_items if expected_items is not None else '?'} "
+          f"COLLECTED {len(items)}", file=sys.stderr)
     if crawled_pages < expected_pages:
         print(f"WARNING bizinfo: {expected_pages - crawled_pages}p 미수집 — partial",
               file=sys.stderr)
         return 2
+    if expected_items is not None and len(items) != expected_items:
+        print(f"WARNING bizinfo: 총건수 {expected_items} 대비 {len(items)}건 수집 — "
+              "partial (행 파싱 누락 가능)", file=sys.stderr)
+        return 2
+    if expected_items is None:
+        print("WARNING bizinfo: 총건수 마커 미발견 — 수집률 미검증(사이트 변경?), "
+              "coverage_manifest에 명시할 것", file=sys.stderr)
     return 0
 
 
-def merge_detail(jsonl_path, source_id, content_hash, attachments, complete):
+def merge_detail(jsonl_path, source_id, content_hash, attachments, complete, source="bizinfo"):
     """목록 jsonl의 해당 레코드에 상세 검증 결과를 병합한다 (원자적 교체)."""
     tmp = jsonl_path + ".tmp"
     found = False
@@ -221,7 +259,7 @@ def merge_detail(jsonl_path, source_id, content_hash, attachments, complete):
             if not line.strip():
                 continue
             r = json.loads(line)
-            if str(r.get("source_id")) == str(source_id):
+            if r.get("source") == source and str(r.get("source_id")) == str(source_id):
                 r["content_hash"] = content_hash
                 r["attachments"] = attachments
                 r["attachments_complete"] = complete
@@ -242,15 +280,21 @@ def cmd_detail(args):
             continue
         try:
             h = fetch(url)
-        except (ManualEscalation, urllib.error.URLError, TimeoutError) as e:
+        except ManualEscalation as e:
+            print(f"MANUAL bizinfo detail: {e}", file=sys.stderr)
+            return 3
+        except (RuntimeError, urllib.error.URLError, TimeoutError) as e:
             print(f"[sole-search] {url[:60]}: {e}", file=sys.stderr)
             failures += 1
             time.sleep(args.delay)
             continue
         attach = [htmllib.unescape(u) for u in
                   re.findall(r'href="(/cmm/fms/[^"]+|/uploads/[^"]+)"', h)]
-        text = strip_html(h)
-        digest = hashlib.sha256(text.encode()).hexdigest()[:16]
+        # 본문 컨테이너만 해시 (메뉴·조회수 등 변동값 배제); 못 찾으면 전체 폴백
+        body_m = re.search(r'<div[^>]+class="[^"]*view_cont[^"]*"[\s\S]*?</div>', h) \
+            or re.search(r'<div[^>]+id="print_area"[\s\S]*?</div>', h)
+        text = strip_html(body_m.group(0) if body_m else h)
+        digest = hashlib.sha256(text.encode()).hexdigest()
         name = re.sub(r"\W+", "_", url.split("://", 1)[1])[:80]
         path = f"{args.output}/{name}.txt"
         with open(path, "w", encoding="utf-8") as f:
@@ -270,9 +314,10 @@ def cmd_detail(args):
                 if not merged:
                     print(f"[sole-search] WARNING: {m.group(1)} 레코드를 "
                           f"{args.merge_into}에서 못 찾음", file=sys.stderr)
+                    failures += 1
         time.sleep(args.delay)
-    if failures == len(args.urls):
-        print("WARNING bizinfo detail: 전건 실패", file=sys.stderr)
+    if failures:
+        print(f"WARNING bizinfo detail: {failures}건 실패/미병합", file=sys.stderr)
         return 2
     return 0
 

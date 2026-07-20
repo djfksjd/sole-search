@@ -95,3 +95,34 @@ def test_screening_and_diff_outputs_ignored(tmp_path):
     (tmp_path / "s.jsonl").write_text(json.dumps(BASE, ensure_ascii=False) + "\n")
     records, sources = d.load_dir(str(tmp_path))
     assert len(records) == 1 and sources == {"sbiz24"}
+
+
+def test_needs_rehash_when_old_hash_and_new_none():
+    old = dict(BASE, content_hash="h1")
+    new = dict(BASE, content_hash=None)
+    r = d.classify(old, new)
+    assert r["kind"] == "NEEDS_REHASH"
+
+
+def test_no_false_positive_when_both_hashes_none():
+    old = dict(BASE, content_hash=None)
+    new = dict(BASE, content_hash=None)
+    assert d.classify(old, new)["kind"] == "UNCHANGED"
+
+
+def test_single_profile_arg_fails_closed(tmp_path):
+    old_dir, new_dir = tmp_path / "o", tmp_path / "n"
+    old_dir.mkdir(); new_dir.mkdir()
+    rec = json.dumps(BASE, ensure_ascii=False)
+    (old_dir / "s.jsonl").write_text(rec + "\n")
+    (new_dir / "s.jsonl").write_text(rec + "\n")
+    prof = tmp_path / "p.md"
+    prof.write_text("---\nindustry_text: 카페\n---\n")
+    script = pathlib.Path(__file__).parent.parent / "skills/sole-search/scripts/diff_surveys.py"
+    out = tmp_path / "out.jsonl"
+    p = subprocess.run([sys.executable, str(script), str(old_dir), str(new_dir),
+                        "--out", str(out), "--new-profile", str(prof)],
+                       capture_output=True, text=True)
+    assert p.returncode == 0
+    assert "한쪽만" in p.stderr
+    assert '"NEW": 1' in p.stderr  # 승계 무효 → 전체 NEW
