@@ -36,7 +36,7 @@ PROFILE_FIELDS = ["entity_type", "business_status", "closure_date", "industry_te
 
 SKIP_FILES = {"screening.jsonl", "new_items.jsonl"}
 # 에이전트가 조사 폴더에 만드는 작업 파일 — 수집 원본이 아니므로 로드하지 않는다
-SKIP_PREFIXES = ("screening", "verdicts", "judge_input", "merged", "new_items")
+SKIP_PREFIXES = ("screen", "verdicts", "judge_input", "merged", "new_items")
 
 
 def load_dir(path):
