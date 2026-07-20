@@ -25,6 +25,7 @@ COMPARE_FIELDS = ["title", "status", "apply_start", "apply_end",
 
 # 판정에 영향을 주는 프로필 필드만 fingerprint에 넣는다
 PROFILE_FIELDS = ["entity_type", "business_status", "closure_date", "industry_text",
+                  "industry_code_candidates", "employee_count_as_of", "sales_period",
                   "registration_date", "regular_employee_count", "headcount",
                   "sbiz_certificate", "sbiz_certificate_valid_until",
                   "sales_band", "sales_basis", "sales_vs_industry_threshold",
@@ -87,10 +88,14 @@ def parse_profile_frontmatter(path):
     if not text.startswith("---"):
         return fields
     body = text.split("---", 2)[1]
+    current = None
     for line in body.splitlines():
         if ":" in line and not line.startswith((" ", "-", "#")):
             k, v = line.split(":", 1)
-            fields[k.strip()] = v.strip()
+            current = k.strip()
+            fields[current] = v.strip()
+        elif current and line.startswith((" ", "-")) and line.strip():
+            fields[current] = (fields[current] + " | " + line.strip()).strip(" |")
     return fields
 
 

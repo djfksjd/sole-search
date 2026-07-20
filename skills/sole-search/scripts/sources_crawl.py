@@ -192,7 +192,7 @@ def cmd_list(args):
     except ManualEscalation as e:
         print(f"MANUAL bizinfo: {e} — region-registry/수동확인으로 전환", file=sys.stderr)
         return 3
-    except (urllib.error.URLError, TimeoutError) as e:
+    except (RuntimeError, urllib.error.URLError, TimeoutError) as e:
         print(f"WARNING bizinfo: 첫 페이지 실패 {e}", file=sys.stderr)
         return 2
 
@@ -246,7 +246,8 @@ def cmd_list(args):
         return 2
     if expected_items is None:
         print("WARNING bizinfo: 총건수 마커 미발견 — 수집률 미검증(사이트 변경?), "
-              "coverage_manifest에 명시할 것", file=sys.stderr)
+              "partial로 기록할 것", file=sys.stderr)
+        return 2
     return 0
 
 

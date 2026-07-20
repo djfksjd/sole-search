@@ -114,3 +114,88 @@ def test_hwp_attachment_extract_fail_means_incomplete(monkeypatch, tmp_path):
     assert att["download_status"] == "ok"
     assert att["extract_status"] == "unsupported"
     assert att["extract_reason"] == "hwp_binary_unsupported"
+
+
+def test_attachment_403_escalates_manual(monkeypatch, tmp_path):
+    detail = json.loads((FIX / "sbiz24_detail.json").read_text())
+    files = json.loads((FIX / "sbiz24_files.json").read_text())
+
+    def fake_post(path, body, **kw):
+        return detail if path.startswith("/api/pbanc/") else files
+
+    def blocked_download(url, path):
+        raise sbiz_crawl.ManualEscalation("첨부 다운로드 HTTP 403")
+    monkeypatch.setattr(sbiz_crawl, "post", fake_post)
+    monkeypatch.setattr(sbiz_crawl, "download_capped", blocked_download)
+    monkeypatch.setattr(sbiz_crawl.time, "sleep", lambda s: None)
+    args = Args(pbanc_sn="679", output=None, download_dir=str(tmp_path / "att"),
+                merge_into=None, delay=0.5)
+    with pytest.raises(sbiz_crawl.ManualEscalation):
+        sbiz_crawl.cmd_detail(args)
+
+
+def test_unsupported_attachment_sha_still_in_content_hash(monkeypatch, tmp_path):
+    # 리뷰 블로커 2 회귀: 추출 실패(HWP)여도 다운로드된 원본 sha는 해시에 포함
+    detail = json.loads((FIX / "sbiz24_detail.json").read_text())
+    files = json.loads((FIX / "sbiz24_files.json").read_text())
+    files["data"]["default"]["list"][0]["fileNm"] = "공고문.hwp"
+
+    def fake_post(path, body, **kw):
+        return detail if path.startswith("/api/pbanc/") else files
+    monkeypatch.setattr(sbiz_crawl, "post", fake_post)
+    monkeypatch.setattr(sbiz_crawl.time, "sleep", lambda s: None)
+
+    hashes = []
+    for content in (b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1AAAA", b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1BBBB"):
+        def fake_download(url, path, _c=content):
+            path.write_bytes(_c)
+            return len(_c)
+        monkeypatch.setattr(sbiz_crawl, "download_capped", fake_download)
+        out = tmp_path / f"d{len(hashes)}.json"
+        args = Args(pbanc_sn="679", output=str(out),
+                    download_dir=str(tmp_path / f"att{len(hashes)}"),
+                    merge_into=None, delay=0.5)
+        assert sbiz_crawl.cmd_detail(args) == 0
+        hashes.append(json.loads(out.read_text())["content_hash"])
+    assert hashes[0] != hashes[1]  # 첨부 교체 → 해시 변경 감지
+
+
+def test_download_failure_leaves_hash_none(monkeypatch, tmp_path):
+    detail = json.loads((FIX / "sbiz24_detail.json").read_text())
+    files = json.loads((FIX / "sbiz24_files.json").read_text())
+
+    def fake_post(path, body, **kw):
+        return detail if path.startswith("/api/pbanc/") else files
+
+    def failing_download(url, path):
+        raise RuntimeError("네트워크 오류")
+    monkeypatch.setattr(sbiz_crawl, "post", fake_post)
+    monkeypatch.setattr(sbiz_crawl, "download_capped", failing_download)
+    monkeypatch.setattr(sbiz_crawl.time, "sleep", lambda s: None)
+    out = tmp_path / "d.json"
+    args = Args(pbanc_sn="679", output=str(out), download_dir=str(tmp_path / "att"),
+                merge_into=None, delay=0.5)
+    assert sbiz_crawl.cmd_detail(args) == 0
+    r = json.loads(out.read_text())
+    assert r["content_hash"] is None  # 불완전 해시 금지 — NEEDS_REHASH 계약
+    assert r["attachments_complete"] is False
+
+
+def test_bizinfo_total_marker_missing_is_partial(monkeypatch, tmp_path):
+    first = (FIX / "bizinfo_page.html").read_text(encoding="utf-8", errors="replace")
+    import re
+    no_marker = re.sub(r'분야\(\d[\d,]*\) 공고보기', '분야보기', first)
+
+    def fake_fetch(url, retries=3):
+        return no_marker
+    monkeypatch.setattr(sources_crawl, "fetch", fake_fetch)
+    args = Args(output=str(tmp_path / "b.jsonl"), delay=0.5)
+    assert sources_crawl.cmd_list(args) == 2
+
+
+def test_bizinfo_first_page_retry_exhaustion_returns_2(monkeypatch, tmp_path):
+    def fake_fetch(url, retries=3):
+        raise RuntimeError("GET failed after 3 tries: 500")
+    monkeypatch.setattr(sources_crawl, "fetch", fake_fetch)
+    args = Args(output=str(tmp_path / "b.jsonl"), delay=0.5)
+    assert sources_crawl.cmd_list(args) == 2

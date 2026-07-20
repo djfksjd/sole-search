@@ -321,6 +321,9 @@ def cmd_detail(args):
                 f["local_path"] = str(path)
                 f["download_status"] = "ok"
                 f["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+                attach_hashes.append(f["sha256"])
+            except ManualEscalation:
+                raise  # 차단 신호 — main에서 exit 3
             except (urllib.error.URLError, urllib.error.HTTPError, RuntimeError, OSError) as e:
                 f["download_status"] = "failed"
                 f["extract_status"] = "failed"
@@ -333,7 +336,6 @@ def cmd_detail(args):
                 text_path = str(path) + ".txt"
                 pathlib.Path(text_path).write_text(r["text"], encoding="utf-8")
                 f["text_path"] = text_path
-                attach_hashes.append(f["sha256"])
             else:
                 f["extract_status"] = "unsupported" if r["reason"] in (
                     "hwp_binary_unsupported", "unsupported_extension") else "failed"
@@ -345,7 +347,14 @@ def cmd_detail(args):
     if not args.download_dir and detail["attachments"]:
         complete = False  # 다운로드/추출 안 함
     detail["attachments_complete"] = complete
-    detail["content_hash"] = content_hash_of(detail["body_text"], attach_hashes)
+    downloads_ok = all(f.get("download_status") == "ok" for f in detail["attachments"]) \
+        if detail["attachments"] else True
+    if args.download_dir and not downloads_ok:
+        detail["content_hash"] = None  # 불완전 해시 대신 None — NEEDS_REHASH 계약과 일치
+    elif not args.download_dir and detail["attachments"]:
+        detail["content_hash"] = None  # 첨부 미다운로드 — 본문만으로는 완전한 해시가 아니다
+    else:
+        detail["content_hash"] = content_hash_of(detail["body_text"], attach_hashes)
     if args.merge_into:
         merged = merge_detail(args.merge_into, detail["source_id"], detail["content_hash"],
                               detail["attachments"], complete)
