@@ -135,6 +135,36 @@ def fix_mojibake(name):
     return name
 
 
+def _write_extract_text(attach_path, text, f):
+    """추출 텍스트를 <첨부>.txt에 기록 — 예측 가능한 이름이므로 사전 배치된
+    symlink/파일을 따라가지 않는다(O_EXCL). 충돌 시 텍스트 저장만 포기하고
+    첨부·해시는 유지한다(fail-closed, 증거 비파괴)."""
+    text_path = str(attach_path) + ".txt"
+    if os.path.lexists(text_path):
+        # 재실행으로 남은 정상 .txt(내용 동일한 일반 파일)만 재사용 — 그 외
+        # (symlink·내용 상이·판독 불가)는 따라가지도 덮지도 않는다
+        try:
+            if not os.path.islink(text_path) and os.path.isfile(text_path) and \
+                    open(text_path, encoding="utf-8").read() == text:
+                return text_path
+        except (OSError, UnicodeDecodeError):
+            pass
+        f["extract_status"] = "failed"
+        f["extract_reason"] = "text_path_preexists_blocked"
+        print(f"WARNING extract {attach_path.name}: 기존 .txt와 충돌(symlink/내용 상이) — "
+              "텍스트 저장 거부", file=sys.stderr)
+        return None
+    try:
+        fd = os.open(text_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except OSError as e:
+        f["extract_status"] = "failed"
+        f["extract_reason"] = f"text_write_blocked: {e}"
+        return None
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return text_path
+
+
 def _sha256_file(path):
     h = hashlib.sha256()
     with open(path, "rb") as fh:
@@ -322,16 +352,12 @@ def process_attachments(attachments, download_dir, delay, allowed_hosts, ua,
         r = attach_extract.extract(str(path))
         if r["ok"] and not r.get("reason"):
             f["extract_status"] = "ok"
-            text_path = str(path) + ".txt"
-            pathlib.Path(text_path).write_text(r["text"], encoding="utf-8")
-            f["text_path"] = text_path
+            f["text_path"] = _write_extract_text(path, r["text"], f)
         elif r["ok"]:
             # 부분 추출(예: hwp_preview_only) — 텍스트는 저장하되 complete 아님
             f["extract_status"] = "partial"
             f["extract_reason"] = r["reason"]
-            text_path = str(path) + ".txt"
-            pathlib.Path(text_path).write_text(r["text"], encoding="utf-8")
-            f["text_path"] = text_path
+            f["text_path"] = _write_extract_text(path, r["text"], f)
             print(f"WARNING extract {f['filename']}: 부분 추출 ({r['reason']})",
                   file=sys.stderr)
         else:

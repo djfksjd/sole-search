@@ -246,3 +246,51 @@ def test_robots_excessive_encoding_fail_closed():
         deep = urllib.parse.quote(deep, safe="")
     assert not ad.robots_path_allowed(f"https://www.bizinfo.go.kr/{deep}/a.hwp",
                                       BIZ_PREFIXES)
+
+
+# ---- 추출 .txt symlink 탈출 차단 -------------------------------------------
+
+def test_extract_txt_symlink_not_followed(tmp_path):
+    """사전 배치된 <첨부>.txt symlink를 따라가 외부 파일을 덮지 않는다."""
+    victim = tmp_path / "victim.txt"
+    victim.write_text("original", encoding="utf-8")
+    attach = tmp_path / "00_공고문.pdf"
+    attach.write_bytes(b"pdf")
+    (tmp_path / "00_공고문.pdf.txt").symlink_to(victim)
+    f = {}
+    out = ad._write_extract_text(attach, "extracted text", f)
+    assert out is None
+    assert f["extract_status"] == "failed"
+    assert f["extract_reason"] == "text_path_preexists_blocked"
+    assert victim.read_text(encoding="utf-8") == "original"  # 외부 무손상
+    assert (tmp_path / "00_공고문.pdf.txt").is_symlink()  # 링크 비삭제
+
+
+def test_extract_txt_rerun_reuses_identical(tmp_path):
+    """재실행으로 남은 동일 내용의 일반 .txt는 재사용한다(정상 플로우 무회귀)."""
+    attach = tmp_path / "00_공고문.pdf"
+    attach.write_bytes(b"pdf")
+    existing = tmp_path / "00_공고문.pdf.txt"
+    existing.write_text("same text", encoding="utf-8")
+    f = {}
+    assert ad._write_extract_text(attach, "same text", f) == str(existing)
+    assert "extract_reason" not in f
+
+
+def test_extract_txt_conflicting_content_refused(tmp_path):
+    """내용이 다른 기존 .txt는 덮지 않는다(증거 보존)."""
+    attach = tmp_path / "00_공고문.pdf"
+    attach.write_bytes(b"pdf")
+    (tmp_path / "00_공고문.pdf.txt").write_text("old", encoding="utf-8")
+    f = {}
+    assert ad._write_extract_text(attach, "new", f) is None
+    assert (tmp_path / "00_공고문.pdf.txt").read_text(encoding="utf-8") == "old"
+
+
+def test_extract_txt_fresh_write(tmp_path):
+    """충돌이 없으면 O_EXCL로 새로 기록한다."""
+    attach = tmp_path / "00_공고문.pdf"
+    attach.write_bytes(b"pdf")
+    f = {}
+    out = ad._write_extract_text(attach, "hello", f)
+    assert out and open(out, encoding="utf-8").read() == "hello"
