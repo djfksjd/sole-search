@@ -108,13 +108,22 @@ def _sha256_file(path):
     return h.hexdigest()
 
 
+def _deny_symlink(path):
+    """기존 경로가 symlink면 거부 — 사전 배치된 링크를 통해 외부 파일을
+    읽거나(sha256 비교) 대체하는 것을 막는다 (fail-closed)."""
+    if os.path.islink(path):
+        raise RuntimeError(f"symlink_blocked: {pathlib.Path(path).name}")
+
+
 def _finalize_no_clobber(tmp, target):
     """tmp를 target으로 옮기되 기존 파일을 절대 덮어쓰지 않는다(증거 보존).
 
     - target 없음 → rename
     - target 있고 내용 동일 → tmp 폐기, 기존 경로 재사용
     - target 있고 내용 다름 → `이름-1.확장자`, `-2`… 접미사로 저장
+    - target·후보가 symlink면 거부 (사전 배치 링크로의 기록/판독 차단)
     """
+    _deny_symlink(target)
     if not target.exists():
         os.replace(tmp, target)
         return target
@@ -124,6 +133,7 @@ def _finalize_no_clobber(tmp, target):
     stem, suffix = target.stem, target.suffix
     for i in range(1, 1000):
         cand = target.with_name(f"{stem}-{i}{suffix}")
+        _deny_symlink(cand)
         if not cand.exists():
             os.replace(tmp, cand)
             return cand
@@ -131,6 +141,28 @@ def _finalize_no_clobber(tmp, target):
             tmp.unlink(missing_ok=True)
             return cand
     raise RuntimeError(f"동명 첨부 접미사 소진: {target.name}")
+
+
+def _safe_record_dir(download_dir, subdir):
+    """<download_dir>[/<정제된 subdir>] 를 만들고 경로를 반환한다 (fail-closed).
+
+    subdir 이름(공고 식별자)은 예측 가능하다 — 사전 배치된 symlink가 mkdir(
+    exist_ok=True)를 통과해 외부 디렉터리를 새 루트로 삼는 것을 막는다:
+    ① 기존 subdir 경로가 symlink면 거부, ② mkdir 후 realpath가 download_dir
+    realpath 내부인지 재검증(경로 구성요소를 통한 우회 포함).
+    """
+    base = pathlib.Path(download_dir).resolve()
+    d = base
+    if subdir:
+        d = base / re.sub(r"[^\w.\-가-힣]", "_", str(subdir))[:80]
+        if os.path.islink(d):
+            raise RuntimeError(f"symlink_subdir_blocked: {d.name}")
+    d.mkdir(parents=True, exist_ok=True)
+    real_base = os.path.realpath(base)
+    real_d = os.path.realpath(d)
+    if os.path.commonpath([real_d, real_base]) != real_base:
+        raise RuntimeError(f"subdir_escape_blocked: {d.name}")
+    return pathlib.Path(real_d)
 
 
 def download_attachment(url, dirpath, fallback_name, idx, allowed_hosts, ua):
@@ -155,13 +187,25 @@ def download_attachment(url, dirpath, fallback_name, idx, allowed_hosts, ua):
             cd_name = r.headers.get_filename()  # Content-Disposition 파일명
             if cd_name:
                 cd_name = fix_mojibake(cd_name)
-            path = (dirpath / safe_filename(cd_name or fallback_name, idx)).resolve()
+            raw_path = dirpath / safe_filename(cd_name or fallback_name, idx)
+            # resolve() 전에 검사한다 — resolve는 사전 배치된 symlink를 따라가
+            # 외부 목적지를 '정상 경로'로 둔갑시킨다
+            _deny_symlink(raw_path)
+            path = raw_path.resolve()
             if os.path.commonpath([str(path), str(dirpath)]) != str(dirpath) \
                     or path.is_symlink():
                 raise RuntimeError("path_escape_blocked")
-            tmp = path.with_name(f".part-{os.getpid()}-{idx}-{path.name}"[:200])
+            tmp_path = path.with_name(f".part-{os.getpid()}-{idx}-{path.name}"[:200])
             read = 0
-            with open(tmp, "wb") as fh:
+            # O_CREAT|O_EXCL: 임시 경로에 사전 배치된 파일/symlink(dangling 포함)가
+            # 있으면 열지 않고 실패한다 — 예측 가능한 이름을 통한 외부 기록 차단.
+            # tmp(정리 대상)는 우리가 만든 뒤에만 설정 — 남의 파일을 지우지 않는다.
+            try:
+                fd = os.open(tmp_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+            except FileExistsError:
+                raise RuntimeError(f"tmp_preexists_blocked: {tmp_path.name}") from None
+            tmp = tmp_path
+            with os.fdopen(fd, "wb") as fh:
                 while True:
                     chunk = r.read(1 << 20)
                     if not chunk:
@@ -196,10 +240,16 @@ def process_attachments(attachments, download_dir, delay, allowed_hosts, ua,
     (같은 폴더 안의 잔여 충돌은 download_attachment의 no-clobber 접미사가 막는다.)
     """
     import attach_extract  # 같은 디렉토리의 추출기 — 추출 성공까지 확인해야 complete
-    d = pathlib.Path(download_dir).resolve()
-    if subdir:
-        d = d / re.sub(r"[^\w.\-가-힣]", "_", str(subdir))[:80]
-    d.mkdir(parents=True, exist_ok=True)
+    try:
+        d = _safe_record_dir(download_dir, subdir)
+    except (RuntimeError, OSError) as e:
+        # 하위 폴더가 사전 배치된 symlink 등 — 요청 없이 전건 실패로 기록(fail-closed)
+        for f in attachments:
+            f["download_status"] = "failed"
+            f["extract_status"] = "failed"
+            f["extract_reason"] = str(e)
+        print(f"WARNING attachments: 다운로드 폴더 검증 실패 — {e}", file=sys.stderr)
+        return []
     attach_hashes = []
     for idx, f in enumerate(attachments):
         if robots_allowed is not None and not robots_allowed(f["url"]):

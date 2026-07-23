@@ -140,3 +140,76 @@ def test_process_attachments_subdir_isolates_records(monkeypatch, tmp_path):
     for a, body in ((a1[0], b"record-one-file"), (a2[0], b"record-two-file")):
         assert _p.Path(a["local_path"]).read_bytes() == body
         assert a["sha256"] == _h.sha256(body).hexdigest()
+
+
+# ---------------- 사전 배치 symlink 차단 (Codex 재심사 HIGH) ----------------
+
+def test_preplaced_subdir_symlink_is_rejected_without_request(monkeypatch, tmp_path):
+    """예측 가능한 subdir 이름에 사전 배치된 symlink → 요청 없이 전건 실패,
+    외부 디렉터리에 어떤 파일도 생기지 않아야 한다."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    base = tmp_path / "att"
+    base.mkdir()
+    (base / "seoulshinbo_ntc-5001").symlink_to(outside)
+    requested = []
+
+    def fake_urlopen(req, timeout=60):
+        requested.append(req.full_url)
+        return FakeResponse(b"x", req.full_url, filename="f.hwp")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    attachments = [{"url": URL, "filename": "f.hwp"}]
+    hashes = ad.process_attachments(attachments, base, 0.5, HOSTS, "ua",
+                                    subdir="seoulshinbo_ntc-5001")
+    assert hashes == []
+    assert requested == []  # 네트워크 요청 자체가 없다
+    assert attachments[0]["download_status"] == "failed"
+    assert "symlink_subdir_blocked" in attachments[0]["extract_reason"]
+    assert list(outside.iterdir()) == []  # 외부 디렉터리 무오염
+
+
+def test_subdir_symlink_escape_realpath_recheck(tmp_path):
+    """islink를 우회해도(예: 경로 구성요소) realpath 재검증이 잡는다."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    base = tmp_path / "att"
+    base.mkdir()
+    (base / "esc").symlink_to(outside)
+    with pytest.raises(RuntimeError, match="symlink_subdir_blocked|subdir_escape"):
+        ad._safe_record_dir(base, "esc")
+    assert list(outside.iterdir()) == []
+
+
+def test_preplaced_tmp_symlink_blocks_write_and_survives(monkeypatch, tmp_path):
+    """임시파일명에 사전 배치된 symlink: O_EXCL이 열기를 거부하고,
+    외부 목적지에 기록되지 않으며, 남의 링크를 지우지도 않는다."""
+    import os as _os
+    d = tmp_path.resolve()
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"original")
+    tmp_name = f".part-{_os.getpid()}-0-00_공고문.hwp"[:200]
+    (d / tmp_name).symlink_to(victim)
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda req, timeout=60: FakeResponse(
+                            b"attacker-controlled", req.full_url, filename="공고문.hwp"))
+    with pytest.raises(RuntimeError, match="tmp_preexists_blocked"):
+        ad.download_attachment(URL, d, "fb.hwp", 0, HOSTS, "ua")
+    assert victim.read_bytes() == b"original"  # 외부 파일 무손상
+    assert (d / tmp_name).is_symlink()  # 우리가 만든 게 아니므로 지우지 않는다
+
+
+def test_preplaced_target_symlink_is_rejected(monkeypatch, tmp_path):
+    """최종 파일명에 사전 배치된 symlink: 판독(sha256)·대체 없이 거부."""
+    d = tmp_path.resolve()
+    victim = tmp_path / "victim.txt"
+    victim.write_bytes(b"original")
+    (d / "00_공고문.hwp").symlink_to(victim)
+    monkeypatch.setattr(urllib.request, "urlopen",
+                        lambda req, timeout=60: FakeResponse(
+                            b"new-content", req.full_url, filename="공고문.hwp"))
+    with pytest.raises(RuntimeError, match="symlink_blocked"):
+        ad.download_attachment(URL, d, "fb.hwp", 0, HOSTS, "ua")
+    assert victim.read_bytes() == b"original"
+    assert (d / "00_공고문.hwp").is_symlink()  # 링크도 대체되지 않았다
+    assert not [p for p in d.iterdir() if p.name.startswith(".part-")]  # 임시 정리됨
