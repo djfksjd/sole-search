@@ -42,10 +42,16 @@ body: 동일 구조
  "aplySeYn":"N","sbrPbancYn":"N","itrstPbancYn":"N","departNmList":null,"searchBox":null,
  "departNmListDisplay":"","ptPbancSortBy":null,"pbancNm":null,"regionCdList":[]}
 
-# 3) 소진공 공고 상세 (pbancDtlCn = 본문 HTML) — sbiz24(pbanc) 전용.
-#    combine 레코드: PBLN_* 은 기업마당이므로 sources_crawl.py detail로,
-#    그 외는 전용 상세 API 계약 미확인 — sbiz_crawl.py detail이 exit 2로 거부(fail-closed),
-#    canonical_url로 수동 확인한다.
+# 3) 공고 상세 (pbancDtlCn = 본문 HTML) — pbanc + combine 비PBLN·비대출 공용.
+#    combine 상세 라우팅 계약(2026-07-23 SPA 번들 PtCombinePbancList + 실호출 검증):
+#      pbancGubun A(공단지원사업)  → /#/pbanc/{pbancSn}      → 본 API 그대로
+#      pbancGubun D(지방정부사업)  → /#/lcgPbanc/{pbancSn}   → 본 API 그대로 (검증: sn 799·800)
+#      pbancGubun B(PBLN_*, 기업마당) → /#/extldPbanc/{pbancId} → sources_crawl.py detail로
+#      pbancGubun C(대출상품)      → /#/loanProduct/{pbancSn} → **계약 미확인, fail-closed**
+#    주의: 대출상품의 pbancSn은 별도 네임스페이스다 — 같은 숫자가 소진공 공고와 겹친다
+#    (실측: combine sn 413 '미소금융 재기자금' vs pbanc sn 413 소공인특화지원센터 공고).
+#    그래서 sbiz_crawl.py detail --source sbiz24_combine 은 --merge-into(목록 jsonl) 필수:
+#    raw.bizType=='대출상품' 거부 + 상세 응답 제목 vs 목록 제목 정규화 비교(불일치 시 exit 2).
 POST https://www.sbiz24.kr/api/pbanc/{pbancSn}
 body: {}
 
@@ -64,7 +70,25 @@ GET https://www.sbiz24.kr/api/cmmn/file/{fileId}
 
 목록 레코드 주요 필드: `pbancSn, pbancNm(제목), rcrtTypeCdNm(지원대상), bizPd(사업기간),
 rcptPd(접수기간 from/to), aplyPsbltySe(Y/신청가능), ddlnDayCnt, departNm(기관, 통합조회),
-bizType(유관기관지원사업 등, 통합조회), pbancId(통합조회), hstgNm(해시태그), regionNmList`
+bizType(유관기관지원사업 등, 통합조회), pbancId(통합조회), pbancGubun(A/B/C/D — 상세
+라우팅 분기, raw에 수집), hstgNm(해시태그), regionNmList`
+
+### combine 상세 스파이크 계측 (2026-07-23, 라이브 1,710건)
+
+| 구분 | 건수 | 상세 경로 |
+|---|---|---|
+| pbanc(소진공 자체) | 498 | `/api/pbanc/{sn}` (기존) |
+| combine PBLN_*(기업마당 위임) | 548 | bizinfo `sources_crawl.py detail` |
+| combine 비PBLN | 664 | 아래 세분 |
+| — 공단지원사업(A) | 341 | `/api/pbanc/{sn}` — 476건은 pbanc 목록과 sn 중복 |
+| — 지방정부사업(D) | 19 | `/api/pbanc/{sn}` (실호출 검증) |
+| — 대출상품(C) | 302 | **fail-closed** (별도 sn 네임스페이스, 계약 미확인) |
+| — 유관기관(E) 등 | 2 | sn이 pbanc 네임스페이스(7자리) — 제목 비교 게이트로 판정 |
+
+첨부도 pbanc와 동일: `groupId=pbancdoc-{sn}` (검증: sn 799, hwp+pdf 2건).
+시도했으나 기각한 후보: `/api/combinePbanc/` 하위 상세 엔드포인트는 SPA 번들에
+존재하지 않음(목록 `list`·`sbrCnt`뿐) — combine 상세 화면 자체가 pbanc/extldPbanc/
+loanProduct 라우트로 위임한다.
 
 주의: 목록 필터 UI에 업력(bhis)·근로자수(wrkr)·매출액(sls) 서버측 필터가 있으나
 **전수 수집 시에는 사용하지 않는다** (필터 신뢰성 미검증 — 선별은 LLM이 전체를 읽고 한다).
@@ -123,7 +147,12 @@ coverage_manifest에 `semas_loan_status: manual`로 기록한다.
 - 공지사항 게시판(세부·수시 모집공고): `POST /portal/v2/readUcenterNtcBbs.do`
   body `pageIndex=N` (10건/페이지, `totalRecordCount` 마커로 총건수 검증),
   행 `detailPage('nttId')` + `span.date`. 상세 `readUcenterNtcBbsView.do?nttId=`
-- 첨부: 상세의 `download.do?fileName=...` 직링크 (뷰어 호출 인자에서 추출)
+- 첨부: 상세의 `download.do?fileName=...` 직링크 (뷰어 호출 인자에서 추출).
+  `detail --download-dir DIR`로 다운로드+추출 — bizinfo와 동일한 공용 슬라이스
+  (attach_download.py: 리다이렉트 사전 검증·fanfandaero.kr 한정·50MB·sha256·mojibake
+  복구). 전부 성공 시 hash v3 스탬프, 실패·생략 시 본문 v2 유지 +
+  `attachments_complete: false` + exit 2. robots(2026-07-23 재확인): 일반 UA에
+  download.do 불허 규칙 없음. 라이브 검증(2026-07-23): ntc-20238 pdf 1건 v3 성공
 - 실행: `region_crawl.py list fanfan -o fanfandaero.jsonl [--since YYYY-MM-DD]`
   게시판 레코드는 접수기간이 목록에 없어 status `불명` → 상세 확인 대상
 - **biz-\* 사업 상세는 정적 수집 미지원** (JS 렌더, 전용 AJAX 없음 — 2026-07-20 검증):
@@ -143,7 +172,13 @@ coverage_manifest에 `semas_loan_status: manual`로 기록한다.
   (공지사항 게시판이 지원사업 공고 게시판. 'STRY0006 사업공고'는 입찰·행정 위주라 수집 제외)
   행 `bbs.goView('page','bno')` + 부서·날짜 td. 페이지당 신규 10건 + 상단고정 반복분
 - 상세: `GET /wbase/contents/bbs/view/{bno}.do?mng_cd=STRY9788`
-- 첨부: `common.download(bno,'serial')` → `GET /download/{bno}/{serial}.do?mng_cd=STRY9788`
+- 첨부: `common.download(bno,'serial')` → `GET /download/{bno}/{serial}.do?mng_cd=STRY9788`.
+  `detail --download-dir DIR`로 다운로드+추출 (공용 슬라이스, seoulshinbo.co.kr 한정,
+  내장 중간 인증서 SSL 컨텍스트 유지). 전부 성공 시 hash v3, 아니면 본문 v2 +
+  `attachments_complete: false` + exit 2. robots: Googlebot 한정 제한 — 일반 UA 허용.
+  라이브 검증(2026-07-23, ntc-22718): 첫 첨부는 정상 다운로드+추출됐으나 연속 다운로드
+  시 서버가 `http://…/common/message.do`(http)로 302 — https-only 정책상
+  blocked_redirect로 fail-closed(partial). 다건 첨부는 재실행 또는 수동 확인 필요
 - 실행: `region_crawl.py list seoulshinbo -o seoulshinbo.jsonl --since <컷오프>`
   **게시판이 수년치 누적(수백 페이지)이라 --since 지정을 권장** (전수는 10분 이상 소요)
 
@@ -182,3 +217,12 @@ coverage_manifest에 `semas_loan_status: manual`로 기록한다.
 - live 검증(2026-07-20, 실키): 전량 10,979건 수집·소상공인 필터 250건 매칭·
   serviceDetail `cond[서비스ID::EQ]` 병합·content_hash 생성 전부 정상.
   v3 필드에 `사용자구분`(개인/법인)·`서비스분야` 존재 — raw에 수집됨(선별 신호로 활용)
+
+## 10. CI first-page smoke canary (2026-07-24)
+
+`.github/workflows/smoke.yml` — 주 2회(월·목 03:00 UTC) + workflow_dispatch.
+6개 크롤러(bizinfo / sbiz pbanc / sbiz combine / fanfan / seoulshinbo / gov24)를
+`--max-pages 1`(첫 페이지만)로 실행해 API·HTML 계약 파손을 조기 감지한다.
+전수 크롤 금지 — `--max-pages`가 걸리면 각 크롤러는 coverage 검증(총건수 대조)을
+생략하고 첫 페이지 파싱 성공만 판정한다(0건 파싱은 여전히 실패). gov24는 선택
+소스라 exit 4(키 미등록)를 skip으로 처리한다. push(main)에는 fixture pytest만 돈다.

@@ -28,6 +28,17 @@ detail 병합 레코드에 `hash_version: 2` 부여.
   python3 region_crawl.py list fanfan -o fanfandaero.jsonl [--since YYYY-MM-DD]
   python3 region_crawl.py list seoulshinbo -o seoulshinbo.jsonl [--since YYYY-MM-DD]
   python3 region_crawl.py detail <canonical_url>... -o details/ [--merge-into X.jsonl]
+      [--download-dir DIR]
+
+detail --download-dir: 첨부를 attach_download 공용 슬라이스(bizinfo와 동일 보안 계약 —
+리다이렉트 사전 검증·소스별 허용 호스트·50MB 상한·sha256·mojibake 복구)로 다운로드+
+추출한다. 전부 성공하면 content_hash를 **hash v3**(본문+정렬된 첨부 sha256,
+`hash_version: 3`)로 스탬프하고, 일부라도 실패·생략이면 본문만의 v2 해시를 유지 +
+`attachments_complete: false` + exit 2 (첨부 미검증을 조용히 숨기지 않는다).
+robots(2026-07-23 재확인): fanfandaero.kr는 Googlebot의 /search.do만, seoulshinbo.co.kr는
+Googlebot 한정 제한 — 두 소스의 첨부 경로(download.do, /download/{bno}/{serial}.do)는
+일반 UA에 불허 규칙 없음. 불허 경로가 생기면 ROBOTS_DISALLOWED에 등록해
+skipped_robots로 남긴다(우회 금지).
 
 종료 코드: 0 성공 / 2 부분·실패 / 3 수동전환(차단 신호).
 stderr 마지막 줄: PAGES <n> COLLECTED <m> (fanfan은 BIZ/NTC 구분 포함)
@@ -95,30 +106,21 @@ _SSL_CTX = ssl.create_default_context()
 _SSL_CTX.load_verify_locations(cadata=_DIGICERT_G2_INTERMEDIATE)
 
 
-class ManualEscalation(RuntimeError):
-    """401/403/CAPTCHA — 우회하지 않고 manual로 전환하라는 신호."""
-
-
-class RedirectBlocked(RuntimeError):
-    """리다이렉트 대상이 https+허용 호스트 검사를 통과하지 못함 — 요청 전에 차단."""
-
-
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """자동 리다이렉트 금지 — open_validated가 각 Location을 요청 전에 검증한다."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
+# 첨부 다운로드/리다이렉트 검증 슬라이스는 attach_download 공용 모듈이 원본이다
+# (sources_crawl과 공유). SSL 컨텍스트는 이 스크립트의 전역 opener가 담당한다.
+import attach_download as _ad
+from attach_download import ManualEscalation, RedirectBlocked  # noqa: F401
 
 # 전역 opener: 내장 중간 인증서 SSL 컨텍스트 유지 + 리다이렉트 비활성(3xx는 HTTPError)
 urllib.request.install_opener(urllib.request.build_opener(
-    urllib.request.HTTPSHandler(context=_SSL_CTX), _NoRedirect))
-
-MAX_REDIRECTS = 5
-_REDIRECT_CODES = (301, 302, 303, 307, 308)
+    urllib.request.HTTPSHandler(context=_SSL_CTX), _ad.NoRedirect))
 
 # 소스별 허용 호스트 — 리다이렉트는 같은 소스 도메인 안에서만 추적한다
 SOURCE_DOMAINS = ("fanfandaero.kr", "seoulshinbo.co.kr")
+
+# robots 불허 첨부 경로 프리픽스 (소스 도메인별). 2026-07-23 재확인 기준 두 소스 모두
+# 일반 UA 불허 규칙이 없어 비어 있다 — 불허가 생기면 여기 등록해 skipped_robots로 남긴다.
+ROBOTS_DISALLOWED = {"fanfandaero.kr": (), "seoulshinbo.co.kr": ()}
 
 
 def _allowed_hosts_for(url):
@@ -129,33 +131,9 @@ def _allowed_hosts_for(url):
     return ()
 
 
-def _host_ok(url, allowed_hosts):
-    host = _url_host(url)  # https가 아니면 "" — 검사 실패
-    return bool(host) and any(_host_is(host, d) for d in allowed_hosts)
-
-
 def open_validated(url, allowed_hosts, timeout, data=None):
-    """자동 리다이렉트 없이 열고, 각 Location을 **요청을 보내기 전에** 절대 URL로
-    해석해 https+허용 호스트 검사를 통과할 때만 최대 5홉 수동 추적한다.
-    위반 시 RedirectBlocked — 외부 호스트로는 요청 자체가 나가지 않는다."""
-    if not _host_ok(url, allowed_hosts):
-        raise RedirectBlocked(f"URL host/scheme 불허: {url[:80]}")
-    for _ in range(MAX_REDIRECTS + 1):
-        req = urllib.request.Request(url, data=data, headers={"User-Agent": UA})
-        try:
-            return urllib.request.urlopen(req, timeout=timeout)
-        except urllib.error.HTTPError as e:
-            if e.code not in _REDIRECT_CODES:
-                raise
-            loc = e.headers.get("Location") if e.headers else None
-            e.close()
-            if not loc:
-                raise RedirectBlocked(f"리다이렉트 Location 없음: {url[:80]}")
-            nxt = urllib.parse.urljoin(url, loc)
-            if not _host_ok(nxt, allowed_hosts):
-                raise RedirectBlocked(f"리다이렉트 대상 불허 — 요청 차단: {nxt[:80]}")
-            url, data = nxt, None  # 리다이렉트 추적은 GET
-    raise RedirectBlocked(f"리다이렉트 {MAX_REDIRECTS}홉 초과: {url[:80]}")
+    """attach_download.open_validated 위임 — UA만 이 소스의 값으로 고정."""
+    return _ad.open_validated(url, allowed_hosts, timeout, UA, data=data)
 
 
 def fetch(url, data=None, retries=3):
@@ -297,12 +275,15 @@ def fanfan_ntc_total(h):
 
 def cmd_list_fanfan(args):
     collected = {}
+    max_pages = getattr(args, "max_pages", None)
     # 1) 사업 목록 JSON — 응답의 years 전 연도를 수집한다
     first = json.loads(fetch(f"{FANFAN}/portal/v2/selectSupportInfoListAjax.do",
                              data={"sprtBizTyCd": "", "sprtBizYr": ""}))
     years = first.get("years") or []
     for it in parse_fanfan_biz(first):
         collected[it["source_id"]] = it
+    if max_pages:
+        years = []  # smoke: 첫 응답만으로 계약 검증 — 연도 순회 생략(저부하)
     try:
         for y in years:
             time.sleep(args.delay)
@@ -350,6 +331,8 @@ def cmd_list_fanfan(args):
                   file=sys.stderr)
             if not new:
                 break
+            if max_pages and page >= max_pages:
+                break  # smoke: 첫 페이지 한정 — coverage 검증은 생략된다
             # 컷오프는 신규 행 기준 — 상단고정글은 매 페이지 반복되므로 items로 보면 안 멈춘다
             if cutoff_reached(new, args.since, "fanfan", warned):
                 stop = True  # 게시판은 최신순 — 컷오프 이전 페이지만 남음
@@ -369,7 +352,7 @@ def cmd_list_fanfan(args):
           f"NTC_TOTAL {total if total is not None else '?'}", file=sys.stderr)
     if partial:
         return 2
-    if not args.since and total is not None and ntc_n < total:
+    if not args.since and not max_pages and total is not None and ntc_n < total:
         print(f"WARNING fanfan: 게시판 총 {total}건 대비 {ntc_n}건 — partial",
               file=sys.stderr)
         return 2
@@ -410,6 +393,7 @@ SSB_EXPECTED_ROWS = 10  # 페이지당 신규 10건 (sources.md §7)
 def cmd_list_ssb(args):
     collected, page, pages, stop = {}, 1, 0, False
     partial = False
+    max_pages = getattr(args, "max_pages", None)
     warned = [False]
     page_counts = []  # 페이지별 파싱 행수 — 마지막 페이지 제외하고 절반 미만이면 partial
     try:
@@ -429,6 +413,8 @@ def cmd_list_ssb(args):
                   file=sys.stderr)
             if not new:
                 break
+            if max_pages and page >= max_pages:
+                break  # smoke: 첫 페이지 한정
             # 컷오프는 신규 행 기준 — 상단고정글은 매 페이지 반복되므로 items로 보면 안 멈춘다
             if cutoff_reached(new, args.since, "seoulshinbo", warned):
                 stop = True
@@ -461,7 +447,8 @@ def strip_html(text):
     return re.sub(r"\n\s*\n+", "\n", text)
 
 
-def merge_detail(jsonl_path, source, source_id, content_hash, attachments, complete):
+def merge_detail(jsonl_path, source, source_id, content_hash, attachments, complete,
+                 hash_version=None):
     tmp = jsonl_path + ".tmp"
     found = False
     with open(jsonl_path, encoding="utf-8") as src, open(tmp, "w", encoding="utf-8") as dst:
@@ -471,7 +458,8 @@ def merge_detail(jsonl_path, source, source_id, content_hash, attachments, compl
             r = json.loads(line)
             if r.get("source") == source and str(r.get("source_id")) == str(source_id):
                 r["content_hash"] = content_hash
-                r["hash_version"] = HASH_VERSION
+                r["hash_version"] = hash_version if hash_version is not None \
+                    else HASH_VERSION
                 r["attachments"] = attachments
                 r["attachments_complete"] = complete
                 found = True
@@ -518,6 +506,26 @@ END_MARKERS = (r'<div[^>]+id="footer"', r'<footer\b', r'<div[^>]+class="[^"]*foo
 
 
 HASH_VERSION = 2  # hash v2 — 순수 숫자 줄을 본문에서 보존(v1과 비교 불가, diff는 1회 CHANGED로 전환)
+HASH_VERSION_ATTACH = 3  # 본문 + 정렬된 첨부 sha256 — sources/sbiz_crawl과 동일 산식
+
+
+def content_hash_of(body_text, attachment_hashes):
+    """hash v3 산식 — sbiz_crawl.content_hash_of / sources_crawl과 동일해야 한다."""
+    payload = body_text + "\n" + "\n".join(sorted(attachment_hashes))
+    return hashlib.sha256(payload.encode()).hexdigest()
+
+
+def robots_allowed_for(domain):
+    """소스 도메인의 robots 불허 프리픽스 검사 함수 (현재 두 소스 모두 불허 없음)."""
+    prefixes = ROBOTS_DISALLOWED.get(domain, ())
+
+    def check(url):
+        try:
+            path = urllib.parse.urlsplit(url).path
+        except ValueError:
+            return False
+        return not any(path.startswith(p) for p in prefixes)
+    return check
 
 
 def extract_body(h, start_pattern):
@@ -612,19 +620,45 @@ def cmd_detail(args):
             continue
         text = extract_body(h, start_pat)
         digest = hashlib.sha256(text.encode()).hexdigest()
+        hash_version = HASH_VERSION
         attachments = attach_fn(h, url)
+        complete = not attachments  # 링크만 수집: 첨부가 있으면 아직 미추출
+        if getattr(args, "download_dir", None) and attachments:
+            domain = "fanfandaero.kr" if source == "fanfandaero" else "seoulshinbo.co.kr"
+            try:
+                attach_hashes = _ad.process_attachments(
+                    attachments, args.download_dir, args.delay, (domain,), UA,
+                    robots_allowed=robots_allowed_for(domain))
+            except ManualEscalation as e:
+                print(f"MANUAL {source} attachment: {e}", file=sys.stderr)
+                return 3
+            downloads_ok = all(f.get("download_status") == "ok" for f in attachments)
+            complete = all(f.get("extract_status") == "ok" for f in attachments)
+            if downloads_ok:
+                # hash v3: 본문 + 정렬된 첨부 sha256 — v2와 비교 불가(diff가 1회 CHANGED)
+                digest = content_hash_of(text, attach_hashes)
+                hash_version = HASH_VERSION_ATTACH
+            # else: 첨부 다운로드 불완전 — 본문만의 v2 해시를 유지한다.
+            # None으로 지우면 반복 실패 두 런 사이의 본문 변경이 UNCHANGED로 숨는다.
+            # 첨부 미검증은 attachments_complete=false + exit 2(partial)로 표현.
+            if not complete:
+                bad = [f.get("filename", "?") for f in attachments
+                       if f.get("extract_status") != "ok"]
+                print(f"WARNING {source} detail: 첨부 {len(bad)}건 다운로드/추출 "
+                      f"실패·생략 ({', '.join(bad[:5])}) — partial", file=sys.stderr)
+                failures += 1
         name = re.sub(r"\W+", "_", f"{source}_{sid}")[:80]
         path = f"{args.output}/{name}.txt"
         with open(path, "w", encoding="utf-8") as f:
             f.write(url + "\n")
             f.write("CONTENT_HASH: " + digest + "\n")
-            f.write(f"HASH_VERSION: {HASH_VERSION}\n")
+            f.write(f"HASH_VERSION: {hash_version}\n")
             f.write("ATTACHMENTS: " + json.dumps(attachments, ensure_ascii=False) + "\n\n")
             f.write(text)
         print(f"[sole-search] saved: {path}", file=sys.stderr)
         if args.merge_into:
             merged = merge_detail(args.merge_into, source, sid, digest, attachments,
-                                  complete=not attachments)  # 링크만 수집 단계
+                                  complete=complete, hash_version=hash_version)
             if not merged:
                 print(f"[sole-search] WARNING: {source}/{sid} 레코드를 "
                       f"{args.merge_into}에서 못 찾음", file=sys.stderr)
@@ -658,11 +692,15 @@ def main():
     lp.add_argument("source", choices=["fanfan", "seoulshinbo"])
     lp.add_argument("-o", "--output", required=True)
     lp.add_argument("--since", help="YYYY-MM-DD — 게시판을 이 날짜까지만 거슬러 수집")
+    lp.add_argument("--max-pages", type=int, default=None,
+                    help="게시판 페이지 상한 (CI smoke용 — coverage 검증 생략)")
     lp.add_argument("--delay", type=positive_delay, default=MIN_DELAY)
     dp = sub.add_parser("detail", help="상세 본문 해시+첨부 링크, --merge-into로 병합")
     dp.add_argument("urls", nargs="+")
     dp.add_argument("-o", "--output", default="details")
     dp.add_argument("--merge-into")
+    dp.add_argument("--download-dir",
+                    help="첨부를 이 폴더에 다운로드+추출 — 전부 성공 시 hash v3 스탬프")
     dp.add_argument("--delay", type=positive_delay, default=MIN_DELAY)
     args = ap.parse_args()
     try:

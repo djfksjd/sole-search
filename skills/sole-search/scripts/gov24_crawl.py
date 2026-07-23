@@ -186,6 +186,7 @@ def match_target(record, needle):
 
 def cmd_list(args, key):
     page, total, collected, matched, raw_fetched = 1, None, {}, 0, 0
+    max_pages = getattr(args, "max_pages", None)
     while True:
         payload = api_get("serviceList", key, {"page": page, "perPage": PER_PAGE,
                                                "returnType": "JSON"})
@@ -219,6 +220,8 @@ def cmd_list(args, key):
                 matched += 1  # dedup 후 카운트 — 중복 행은 세지 않는다
         print(f"[sole-search] gov24 p{page}: {len(data)} fetched, "
               f"kept {len(collected)}/{total}", file=sys.stderr)
+        if max_pages and page >= max_pages:
+            break  # smoke: 페이지 상한 — coverage 검증 생략
         if page * PER_PAGE >= total or not data:
             break
         page += 1
@@ -231,6 +234,8 @@ def cmd_list(args, key):
     os.replace(tmp, args.output)
     extra = f" MATCHED {matched}" if args.filter_target else ""
     print(f"TOTAL {total} COLLECTED {len(collected)}{extra}", file=sys.stderr)
+    if max_pages:
+        return 0  # smoke: 첫 페이지 계약(식별자·필드) 검증만 — coverage 생략
     # 수집률 검증은 필터 전 원시 수신 건수로 — --filter-target 모드에서도 적용
     if total and raw_fetched < total:
         print(f"WARNING gov24: 총 {total} 대비 원시 수신 {raw_fetched}건 — partial",
@@ -328,6 +333,8 @@ def main():
     lp = sub.add_parser("list", help="공공서비스 전체 목록 수집")
     lp.add_argument("-o", "--output", required=True)
     lp.add_argument("--filter-target", help="지원대상·제목·내용 키워드 필터 (예: 소상공인)")
+    lp.add_argument("--max-pages", type=int, default=None,
+                    help="페이지 상한 (CI smoke용 — coverage 검증 생략)")
     lp.add_argument("--key")
     lp.add_argument("--delay", type=positive_delay, default=MIN_DELAY)
     dp = sub.add_parser("detail", help="서비스ID 상세 조회, --merge-into로 병합")
