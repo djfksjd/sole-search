@@ -88,6 +88,41 @@ def safe_filename(name, idx):
     return f"{idx:02d}_{base[:120]}" if base else f"{idx:02d}_attach"
 
 
+_MAX_UNQUOTE = 5  # 반복 percent-디코딩 상한 (이중 인코딩 %2575… 커버)
+
+
+def robots_path_allowed(url, disallowed_prefixes):
+    """robots 불허 접두 검사 — 인코딩 위장에 fail-closed.
+
+    단순 startswith는 /%75ploads(→/uploads), /%2Fuploads(→//uploads, POSIX
+    normpath가 선행 '//'를 보존), /x/../uploads 로 우회된다. 원본·반복 unquote
+    전 단계·normpath·선행 슬래시 단일화 형태 중 하나라도 불허 접두에 걸리면
+    거부하고, 디코딩 불가·상한 초과·파싱 불가도 거부한다."""
+    if not disallowed_prefixes:
+        return True
+    try:
+        path = urllib.parse.urlsplit(url).path
+    except ValueError:
+        return False
+    candidates = []
+    cur = path
+    for _ in range(_MAX_UNQUOTE + 1):
+        candidates.append(cur)
+        try:
+            nxt = urllib.parse.unquote(cur)
+        except (ValueError, UnicodeDecodeError):
+            return False
+        if nxt == cur:
+            break
+        cur = nxt
+    else:
+        return False  # 상한 내 고정점 미도달(과도한 다중 인코딩) — fail-closed
+    for c in list(candidates):
+        n = os.path.normpath(c)
+        candidates.extend([n, re.sub(r"^/+", "/", c), re.sub(r"^/+", "/", n)])
+    return not any(c.startswith(p) for c in candidates for p in disallowed_prefixes)
+
+
 def fix_mojibake(name):
     """서버가 UTF-8 바이트를 그대로 보내면 latin-1로 잘못 디코드된 모지바케가 온다 —
     되돌려서 복원 (실측: bizinfo, 2026-07-23). %-인코딩이면 unquote."""

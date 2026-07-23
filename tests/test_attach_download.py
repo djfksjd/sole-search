@@ -213,3 +213,36 @@ def test_preplaced_target_symlink_is_rejected(monkeypatch, tmp_path):
     assert victim.read_bytes() == b"original"
     assert (d / "00_공고문.hwp").is_symlink()  # 링크도 대체되지 않았다
     assert not [p for p in d.iterdir() if p.name.startswith(".part-")]  # 임시 정리됨
+
+
+# ---- percent-인코딩 robots 우회 차단 (ir-search 게이트 동일 결함 선제 반영) ----
+
+BIZ_PREFIXES = ("/upload", "/download")
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.bizinfo.go.kr/%75ploads/a.hwp",       # /uploads
+    "https://www.bizinfo.go.kr/%2575ploads/a.hwp",     # 이중 인코딩
+    "https://www.bizinfo.go.kr/x/../uploads/a.hwp",    # normpath
+    "https://www.bizinfo.go.kr/%2Fuploads/a.hwp",      # → //uploads (normpath 보존)
+    "https://www.bizinfo.go.kr//uploads/a.hwp",        # 직접 이중 슬래시
+    "https://www.bizinfo.go.kr/%2F%2Fuploads/a.hwp",   # ///uploads
+    "https://www.bizinfo.go.kr/downloadFile.do",       # 평문 접두
+])
+def test_robots_encoded_bypass_blocked(url):
+    assert not ad.robots_path_allowed(url, BIZ_PREFIXES)
+
+
+def test_robots_normal_path_allowed():
+    assert ad.robots_path_allowed(
+        "https://www.bizinfo.go.kr/cmm/fms/getFile.do", BIZ_PREFIXES)
+    assert ad.robots_path_allowed("https://x.kr/any/path", ())  # 불허 없음 → 허용
+
+
+def test_robots_excessive_encoding_fail_closed():
+    url = "https://www.bizinfo.go.kr/" + "%25" * 6 + "75ploads/a.hwp"
+    deep = "uploads"
+    for _ in range(7):
+        deep = urllib.parse.quote(deep, safe="")
+    assert not ad.robots_path_allowed(f"https://www.bizinfo.go.kr/{deep}/a.hwp",
+                                      BIZ_PREFIXES)

@@ -347,11 +347,8 @@ def content_hash_of(body_text, attachment_hashes):
 
 
 def robots_allowed(url):
-    try:
-        path = urllib.parse.urlsplit(url).path
-    except ValueError:
-        return False
-    return not any(path.startswith(p) for p in ROBOTS_DISALLOWED_PREFIXES)
+    # 인코딩 위장(/%75ploads, /%2Fuploads 등) fail-closed 검사는 공용 모듈에
+    return _ad.robots_path_allowed(url, ROBOTS_DISALLOWED_PREFIXES)
 
 
 def download_attachment(url, dirpath, fallback_name, idx):

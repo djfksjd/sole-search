@@ -520,11 +520,8 @@ def robots_allowed_for(domain):
     prefixes = ROBOTS_DISALLOWED.get(domain, ())
 
     def check(url):
-        try:
-            path = urllib.parse.urlsplit(url).path
-        except ValueError:
-            return False
-        return not any(path.startswith(p) for p in prefixes)
+        # 인코딩 위장 fail-closed 검사는 공용 모듈에
+        return _ad.robots_path_allowed(url, prefixes)
     return check
 
 
