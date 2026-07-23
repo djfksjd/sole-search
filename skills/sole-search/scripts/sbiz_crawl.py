@@ -7,11 +7,22 @@
 
 사용법:
   python3 sbiz_crawl.py list [pbanc|combine|all] -o out.jsonl [--page-size 100] [--delay 0.5]
-  python3 sbiz_crawl.py detail <pbancSn> [-o out.json] [--download-dir DIR]
+  python3 sbiz_crawl.py detail <pbancSn> [--source sbiz24|sbiz24_combine]
+      [-o out.json] [--download-dir DIR] [--merge-into out.jsonl]
+
+detail 분기 (fail-closed):
+  - 대상 ID가 PBLN_* 이면 기업마당 공고다 — sources_crawl.py detail <bizinfo URL>로
+    검증하라는 안내와 함께 exit 2.
+  - --source sbiz24_combine 이고 PBLN_* 이 아니면 combine 전용 상세 API 계약이
+    미확인이므로 "레코드의 url 필드로 수동 확인" 안내와 함께 exit 2 (조용한 오동작 금지).
+  - 상세 조회는 --source sbiz24(기본, pbanc API)만 지원한다.
 
 계약: references/sources.md 참조. 필수 헤더 Origin-Method: GET.
 종료 시 stderr에 `TOTAL <n> COLLECTED <m>` 출력 (coverage 검증용).
-수집 실패(부분 수집)면 종료 코드 2.
+수집 실패(부분 수집·첨부 다운로드/추출 실패 포함)면 종료 코드 2, 차단 신호는 3.
+목록 정렬: sortModel의 pbancSn desc 정렬은 실호출 검증 실패(colId/field/sortColumn
+전부 비단조 응답, 2026-07-23) — 정렬 없이 수집하며 DUPLICATES>0이면 삽입 경합
+가능성을 stderr로 경고한다.
 """
 import argparse
 import hashlib
@@ -248,6 +259,16 @@ def cmd_list(args):
             dup = fetched - collected
             print(f"{mode}: TOTAL {total} COLLECTED {collected} DUPLICATES {dup}",
                   file=sys.stderr)
+            if dup > 0:
+                # 목록이 명시적 정렬 없이 페이지네이션된다(sortModel 검증 실패) —
+                # 수집 중 신규 공고 삽입으로 경계가 밀려 중복/누락이 생길 수 있다
+                print(f"WARNING {mode}: DUPLICATES {dup} — 삽입 경합 가능 — 재실행 권장",
+                      file=sys.stderr)
+            if total == 0 or collected == 0:
+                print(f"WARNING {mode}: total={total} collected={collected} — "
+                      "0건 수집은 API 구조 변경/장애 신호, failed로 기록할 것",
+                      file=sys.stderr)
+                ok = False
             grand_total += total
             grand_collected += collected
             if fetched < total:  # 중복 제외 실누락만 실패로 본다
@@ -297,6 +318,17 @@ def content_hash_of(body_text, attachment_hashes):
 
 
 def cmd_detail(args):
+    sn = str(args.pbanc_sn)
+    if sn.startswith("PBLN_"):
+        print(f"ERROR: {sn} 은 기업마당 공고(PBLN_*) — sbiz24 상세 API 대상이 아니다. "
+              "sources_crawl.py detail <bizinfo URL>로 검증하라 "
+              f"(URL: https://www.bizinfo.go.kr/sii/siia/selectSIIA200Detail.do?pblancId={sn})",
+              file=sys.stderr)
+        return 2
+    if args.source == "sbiz24_combine":
+        print(f"ERROR: combine 전용 상세 API는 계약 미확인(미지원) — {sn} 은 "
+              "레코드의 canonical_url 필드로 수동 확인하라 (fail-closed)", file=sys.stderr)
+        return 2
     detail_data = post(f"/api/pbanc/{args.pbanc_sn}", {})
     detail = parse_detail(detail_data)
     time.sleep(args.delay)
@@ -331,17 +363,27 @@ def cmd_detail(args):
                 print(f"WARNING attachment {f['filename']}: {e}", file=sys.stderr)
                 continue
             r = attach_extract.extract(str(path))
-            if r["ok"]:
+            if r["ok"] and not r.get("reason"):
                 f["extract_status"] = "ok"
                 text_path = str(path) + ".txt"
                 pathlib.Path(text_path).write_text(r["text"], encoding="utf-8")
                 f["text_path"] = text_path
+            elif r["ok"]:
+                # 부분 추출(예: hwp_preview_only) — 텍스트는 저장하되 complete 아님,
+                # SKILL.md 규칙: attachments_complete=false → '확인됨' 금지
+                f["extract_status"] = "partial"
+                f["extract_reason"] = r["reason"]
+                text_path = str(path) + ".txt"
+                pathlib.Path(text_path).write_text(r["text"], encoding="utf-8")
+                f["text_path"] = text_path
+                print(f"WARNING extract {f['filename']}: 부분 추출 ({r['reason']})",
+                      file=sys.stderr)
             else:
                 f["extract_status"] = "unsupported" if r["reason"] in (
                     "hwp_binary_unsupported", "unsupported_extension") else "failed"
                 f["extract_reason"] = r["reason"]
                 print(f"WARNING extract {f['filename']}: {r['reason']}", file=sys.stderr)
-    # complete = 첨부가 없거나, 모든 첨부의 추출까지 성공
+    # complete = 첨부가 없거나, 모든 첨부의 추출까지 성공 (partial은 미완)
     complete = all(f.get("extract_status") == "ok" for f in detail["attachments"]) \
         if detail["attachments"] else True
     if not args.download_dir and detail["attachments"]:
@@ -355,19 +397,29 @@ def cmd_detail(args):
         detail["content_hash"] = None  # 첨부 미다운로드 — 본문만으로는 완전한 해시가 아니다
     else:
         detail["content_hash"] = content_hash_of(detail["body_text"], attach_hashes)
+    # 상세 JSON은 merge 성패와 무관하게 먼저 기록한다 (기록 없이 return 금지)
+    text = json.dumps(detail, ensure_ascii=False, indent=2)
+    if args.output:
+        open(args.output, "w", encoding="utf-8").write(text)
+    else:
+        print(text)
+    rc = 0
     if args.merge_into:
         merged = merge_detail(args.merge_into, detail["source_id"], detail["content_hash"],
                               detail["attachments"], complete)
         if not merged:
             print(f"WARNING: source_id={detail['source_id']} 레코드를 "
                   f"{args.merge_into}에서 못 찾음", file=sys.stderr)
-            return 2
-    text = json.dumps(detail, ensure_ascii=False, indent=2)
-    if args.output:
-        open(args.output, "w", encoding="utf-8").write(text)
-    else:
-        print(text)
-    return 0
+            rc = 2
+    # 첨부 다운로드/추출 실패·부분이 1건 이상이면 partial (조용한 누락 금지)
+    if args.download_dir:
+        bad = [f["filename"] for f in detail["attachments"]
+               if f.get("extract_status") != "ok"]
+        if bad:
+            print(f"WARNING sbiz24 detail: 첨부 {len(bad)}건 다운로드/추출 실패·부분 "
+                  f"({', '.join(bad[:5])}) — partial", file=sys.stderr)
+            rc = 2
+    return rc
 
 
 def merge_detail(jsonl_path, source_id, content_hash, attachments, complete, source="sbiz24"):
@@ -413,6 +465,8 @@ def main():
     lp.add_argument("--delay", type=min_delay, default=0.5)
     dp = sub.add_parser("detail")
     dp.add_argument("pbanc_sn")
+    dp.add_argument("--source", choices=["sbiz24", "sbiz24_combine"], default="sbiz24",
+                    help="레코드의 source 필드 값 — combine 레코드는 상세 API 미지원(안내 후 exit 2)")
     dp.add_argument("-o", "--output")
     dp.add_argument("--download-dir")
     dp.add_argument("--merge-into", help="목록 jsonl에 content_hash·첨부 결과 병합")
@@ -423,6 +477,12 @@ def main():
     except ManualEscalation as e:
         print(f"MANUAL sbiz24: {e}", file=sys.stderr)
         sys.exit(3)
+    except (RuntimeError, KeyError, urllib.error.URLError, TimeoutError,
+            json.JSONDecodeError) as e:
+        # 계약 밖 traceback(exit 1) 대신 WARNING + partial — API 구조 변경/네트워크 장애
+        print(f"WARNING sbiz24: {type(e).__name__}: {e} — failed/partial로 기록할 것",
+              file=sys.stderr)
+        sys.exit(2)
 
 
 if __name__ == "__main__":
