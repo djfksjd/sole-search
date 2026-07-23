@@ -93,13 +93,14 @@ survey_sources: [sbiz24, sbiz24_combine, bizinfo, fanfandaero]  # 서울이면 +
    ```
    `--incremental-sources`에는 `--since` 컷오프로 수집한 소스를 넣는다 — 그 소스는
    이전 레코드 부재가 소멸이 아니므로 GONE을 계산하지 않는다
-3. 검토·상세검증은 `new_items.jsonl`(NEW+CHANGED+NEEDS_REHASH)만. GONE 레코드도
-   같은 파일에 `diff_status: GONE`으로 기록된다(기회 소멸 알림 재료). UNCHANGED는 직전 판정 승계.
-   단 **프로필 fingerprint가 바뀌었다는 WARNING이 나오면 전체 재판정**
-4. **NEEDS_REHASH** = 직전 조사에 content_hash가 있었는데 새 목록엔 아직 없음, **또는
-   두 조사의 hash_version이 다름**(해시 산식 v1↔v2 — 값 비교 불가). 목록 필드만으로
+3. 검토·상세검증은 `new_items.jsonl`(NEW+CHANGED+NEEDS_REHASH)만. GONE은 **별도 파일
+   `gone_new_items.jsonl`**에 기록된다(기회 소멸 알림 재료 — 검토 대상과 섞지 않는다).
+   UNCHANGED는 직전 판정 승계. 단 **프로필 fingerprint가 바뀌었다는 WARNING이 나오면 전체 재판정**
+4. **NEEDS_REHASH** = 직전 조사에 content_hash가 있었는데 새 목록엔 아직 없음. 목록 필드만으로
    같아 보여도 본문·첨부가 바뀌었을 수 있으니 **상세 재수집(`detail --merge-into`) 후 해시를
-   채우고 재비교**한다 — 그때 같으면 승계, 다르면 변경 처리
+   채우고 재비교**한다 — 그때 같으면 승계, 다르면 변경 처리. **hash_version이 다른 경우**(해시
+   산식 v1↔v2)는 값 비교가 불가능하므로 1회 CHANGED로 분류된다 — 상세 재검증하면 이번
+   조사부터 양쪽 v2로 수렴한다
 5. **정책자금(loan) 전체와 직전 `확인됨` 항목은 diff 결과와 무관하게 접수상태를 재확인**
 6. 보고서: 신규 / 변경(마감·조건 — changed_fields 표기) / 소멸된 확인됨 항목(기회 소멸 알림) / 승계 요약.
    WARNING(미갱신 소스)은 coverage_manifest에 "미갱신" 명시

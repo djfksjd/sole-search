@@ -271,7 +271,13 @@ def cmd_list(args):
                 ok = False
             grand_total += total
             grand_collected += collected
-            if fetched < total:  # 중복 제외 실누락만 실패로 본다
+            if fetched < total:  # 페이지 순회가 서버 총건수에 미달
+                ok = False
+            elif dup > 0 and collected < total:
+                # fetched==total이어도 중복이 누락을 상쇄했을 수 있다(페이지 경계
+                # 삽입 경합) — 고유 수집분이 총건수에 못 미치면 partial로 본다
+                print(f"WARNING {mode}: 고유 {collected} < 총 {total} (중복 {dup}) — "
+                      "누락 가능, partial", file=sys.stderr)
                 ok = False
     os.replace(tmp_path, args.output)
     print(f"TOTAL {grand_total} COLLECTED {grand_collected}", file=sys.stderr)

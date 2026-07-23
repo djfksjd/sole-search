@@ -27,6 +27,7 @@ import glob
 import hashlib
 import json
 import os
+import pathlib
 import sys
 
 COMPARE_FIELDS = ["title", "status", "apply_start", "apply_end",
@@ -92,8 +93,10 @@ def classify(old, new):
     if changed:
         return {"kind": "CHANGED", "changed_fields": changed}
     if hash_incomparable:
-        # 해시 산식 버전이 다르면(v1↔v2) 값 비교가 무의미 — 재해시 필요
-        return {"kind": "NEEDS_REHASH", "changed_fields": []}
+        # 해시 산식 버전이 다르면(v1↔v2) 값 비교가 무의미. NEEDS_REHASH로 두면
+        # 재수집해도 old가 여전히 v1이라 영구 루프 — 1회 CHANGED(상세 재검증)로
+        # 전환시켜 이번 조사부터 양쪽 v2로 수렴하게 한다.
+        return {"kind": "CHANGED", "changed_fields": ["hash_version(산식 전환 — 1회 상세 재검증)"]}
     if old_h and not new_h:
         # 목록 필드는 동일하지만 새 조사에 해시가 없다 — 상세 재수집 후 재분류해야 한다
         return {"kind": "NEEDS_REHASH", "changed_fields": []}
@@ -161,10 +164,14 @@ def main():
     elif args.old_profile and args.new_profile:
         old_fields = parse_profile_frontmatter(args.old_profile)
         new_fields = parse_profile_frontmatter(args.new_profile)
-        if not old_fields or not new_fields:
+        # 판정 필드가 하나도 없는(잘린) 프로필은 파싱 실패와 같다 — 빈 프로필 두 개가
+        # "동일 fingerprint"로 승계를 통과하면 안 된다 (fail-closed)
+        old_axes = any(old_fields.get(k) for k in PROFILE_FIELDS)
+        new_axes = any(new_fields.get(k) for k in PROFILE_FIELDS)
+        if not old_fields or not new_fields or not old_axes or not new_axes:
             invalidate = True  # fail-closed: 프로필을 못 읽으면 승계하지 않는다
-            print("WARNING: 프로필 파일을 읽지 못했다 — 승계 무효(fail-closed), 전체 재검토",
-                  file=sys.stderr)
+            print("WARNING: 프로필 파일을 읽지 못했거나 판정 필드가 비어 있다 — "
+                  "승계 무효(fail-closed), 전체 재검토", file=sys.stderr)
         elif not carryover_valid(profile_fingerprint(old_fields),
                                  profile_fingerprint(new_fields)):
             invalidate = True
@@ -180,22 +187,26 @@ def main():
               file=sys.stderr)
 
     counts = {"NEW": 0, "CHANGED": 0, "NEEDS_REHASH": 0, "UNCHANGED": 0, "GONE": 0}
-    with open(args.out, "w", encoding="utf-8") as out:
-        def emit(kind, changed_fields, rec):
-            # 기존 소비자 호환: kind/changed_fields/record 유지, diff_status만 추가
-            out.write(json.dumps({"kind": kind, "diff_status": kind,
-                                  "changed_fields": changed_fields,
-                                  "record": rec}, ensure_ascii=False) + "\n")
+    # GONE은 검토 대상(NEW/CHANGED/NEEDS_REHASH)과 소비 방식이 다르다 — --out에 섞으면
+    # 기존 소비자가 소멸 공고를 상세검증 대상으로 오인하므로 별도 파일로 분리한다.
+    out_path = pathlib.Path(args.out)
+    gone_path = out_path.with_name("gone_" + out_path.name)
+    with open(args.out, "w", encoding="utf-8") as out, \
+            open(gone_path, "w", encoding="utf-8") as gone_out:
+        def emit(kind, changed_fields, rec, fh):
+            fh.write(json.dumps({"kind": kind, "diff_status": kind,
+                                 "changed_fields": changed_fields,
+                                 "record": rec}, ensure_ascii=False) + "\n")
 
         for key, rec in new.items():
             if invalidate or key not in old:
                 counts["NEW"] += 1
-                emit("NEW", [], rec)
+                emit("NEW", [], rec, out)
                 continue
             r = classify(old[key], rec)
             counts[r["kind"]] += 1
             if r["kind"] in ("CHANGED", "NEEDS_REHASH"):
-                emit(r["kind"], r["changed_fields"], rec)
+                emit(r["kind"], r["changed_fields"], rec, out)
         gone = [k for k in old if k not in new and old[k].get("source") in new_sources]
         skipped_incremental = [k for k in gone if k[0] in incremental]
         if skipped_incremental:
@@ -205,9 +216,10 @@ def main():
             if key[0] in incremental:
                 continue  # --since 컷오프 수집 — 이전 레코드 부재는 소멸이 아니다
             counts["GONE"] += 1
-            emit("GONE", [], old[key])
+            emit("GONE", [], old[key], gone_out)
             print(f"GONE: {key[0]}/{key[1]} — {old[key].get('title', '')[:50]}",
                   file=sys.stderr)
+    print(f"GONE {counts['GONE']}건 → {gone_path}", file=sys.stderr)
 
     print("SUMMARY " + json.dumps(counts, ensure_ascii=False), file=sys.stderr)
 

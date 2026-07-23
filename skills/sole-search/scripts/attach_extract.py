@@ -26,6 +26,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import time
 import zipfile
 from xml.etree import ElementTree
 
@@ -230,9 +231,21 @@ def main():
     r = extract(args.file)
     if args.output:
         if r["ok"]:
-            pathlib.Path(args.output).write_text(r["text"], encoding="utf-8")
+            text = r["text"]
+            if r.get("reason") == "hwp_preview_only":
+                # 파일만 보는 소비자도 부분 추출임을 알 수 있게 파일 안에 마커를 남긴다
+                text = ("[HWP_PREVIEW_ONLY — 미리보기 부분 추출: 전체 본문 아님. "
+                        "이 텍스트만으로 '확인됨' 판정 금지]\n\n") + text
+            pathlib.Path(args.output).write_text(text, encoding="utf-8")
         else:
-            # 실패 시 빈 파일을 만들지 않는다 — reason을 담은 마커 파일만 생성
+            # 실패 시 빈 파일을 만들지 않는다 — reason을 담은 마커 파일만 생성.
+            # 이전 실행의 성공 출력이 남아 있으면 stale로 밀어 혼동을 막는다.
+            outp = pathlib.Path(args.output)
+            if outp.exists():
+                stale = args.output + ".stale-" + time.strftime("%Y%m%d-%H%M%S")
+                outp.rename(stale)
+                print(f"[sole-search] 이전 출력은 {stale}로 보존(현재 추출 실패)",
+                      file=sys.stderr)
             failed = args.output + ".failed.json"
             pathlib.Path(failed).write_text(json.dumps(
                 {"ok": False, "reason": r["reason"], "file": args.file},
