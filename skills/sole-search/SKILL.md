@@ -194,12 +194,13 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/attach_extract.py" \
 
 **sbiz24_combine 레코드의 상세 분기** (계약: references/sources.md §1):
 - ID가 `PBLN_*` → 기업마당 공고 — `sources_crawl.py detail <bizinfo URL>`로 검증
-- 비PBLN·비대출(공단/지방정부 등) → `sbiz_crawl.py detail <sn> --source sbiz24_combine
-  --merge-into sbiz24.jsonl` — pbanc 상세 API를 공유한다(2026-07-23 실호출 검증).
-  **--merge-into 필수**: 목록 레코드로 대출상품을 거르고 상세 제목과 대조한다(불일치 시
-  exit 2, 조용한 오독 금지)
-- `raw.bizType`이 `대출상품` → 별도 네임스페이스(계약 미확인)라 exit 2로 거부(fail-closed)
-  — canonical_url로 수동 확인
+- 비PBLN·비대출(`raw.pbancGubun`이 A(공단)/D(지방정부)) → `sbiz_crawl.py detail <sn>
+  --source sbiz24_combine --merge-into sbiz24.jsonl` — pbanc 상세 API를 공유한다
+  (2026-07-23 실호출 검증). **--merge-into 필수**: 목록 레코드의 pbancGubun 게이트 +
+  상세 응답 sn·제목 대조를 통과해야 병합한다(불일치 시 exit 2, 조용한 오독 금지)
+- `raw.pbancGubun`이 C(대출상품)·미지 코드·부재(구버전 목록) → 별도 네임스페이스/계약
+  미확인이라 exit 2로 거부(fail-closed) — canonical_url로 수동 확인.
+  bizType=`대출상품` 문자열도 보조 검사로 거부된다
 
 판정 상태 5단계:
 

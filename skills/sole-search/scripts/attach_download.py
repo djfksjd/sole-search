@@ -100,12 +100,49 @@ def fix_mojibake(name):
     return name
 
 
+def _sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def _finalize_no_clobber(tmp, target):
+    """tmp를 target으로 옮기되 기존 파일을 절대 덮어쓰지 않는다(증거 보존).
+
+    - target 없음 → rename
+    - target 있고 내용 동일 → tmp 폐기, 기존 경로 재사용
+    - target 있고 내용 다름 → `이름-1.확장자`, `-2`… 접미사로 저장
+    """
+    if not target.exists():
+        os.replace(tmp, target)
+        return target
+    if _sha256_file(target) == _sha256_file(tmp):
+        tmp.unlink(missing_ok=True)
+        return target
+    stem, suffix = target.stem, target.suffix
+    for i in range(1, 1000):
+        cand = target.with_name(f"{stem}-{i}{suffix}")
+        if not cand.exists():
+            os.replace(tmp, cand)
+            return cand
+        if _sha256_file(cand) == _sha256_file(tmp):
+            tmp.unlink(missing_ok=True)
+            return cand
+    raise RuntimeError(f"동명 첨부 접미사 소진: {target.name}")
+
+
 def download_attachment(url, dirpath, fallback_name, idx, allowed_hosts, ua):
-    """보안 계약(모듈 docstring) 전체를 적용해 첨부를 저장하고 경로를 반환한다."""
+    """보안 계약(모듈 docstring) 전체를 적용해 첨부를 저장하고 경로를 반환한다.
+
+    스트리밍은 임시 파일로 받고, 최종 이름은 _finalize_no_clobber로 확정한다 —
+    같은 폴더의 기존 파일(다른 공고의 동명 첨부 등)을 덮어쓰지 않는다.
+    """
     if not host_allowed(url, allowed_hosts):
         raise RuntimeError(f"첨부 URL host/scheme 불허: {url[:80]}")
     dirpath = pathlib.Path(dirpath).resolve()
-    path = None
+    tmp = None
     try:
         with open_validated(url, allowed_hosts, timeout=60, ua=ua) as r:
             # 사전 검증이 1차 방어 — geturl 재검사는 심층 방어로 유지한다
@@ -122,8 +159,9 @@ def download_attachment(url, dirpath, fallback_name, idx, allowed_hosts, ua):
             if os.path.commonpath([str(path), str(dirpath)]) != str(dirpath) \
                     or path.is_symlink():
                 raise RuntimeError("path_escape_blocked")
+            tmp = path.with_name(f".part-{os.getpid()}-{idx}-{path.name}"[:200])
             read = 0
-            with open(path, "wb") as fh:
+            with open(tmp, "wb") as fh:
                 while True:
                     chunk = r.read(1 << 20)
                     if not chunk:
@@ -133,27 +171,34 @@ def download_attachment(url, dirpath, fallback_name, idx, allowed_hosts, ua):
                         raise RuntimeError(
                             f"첨부가 {MAX_ATTACH_BYTES // (1 << 20)}MB 상한 초과")
                     fh.write(chunk)
-            return path
+            return _finalize_no_clobber(tmp, path)
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             raise ManualEscalation(f"첨부 다운로드 HTTP {e.code}") from e
         raise
     except (RuntimeError, OSError):
-        if path is not None:
-            path.unlink(missing_ok=True)  # 부분 파일 잔존 방지
+        if tmp is not None:
+            tmp.unlink(missing_ok=True)  # 부분 파일 잔존 방지
         raise
 
 
 def process_attachments(attachments, download_dir, delay, allowed_hosts, ua,
-                        robots_allowed=None):
+                        robots_allowed=None, subdir=None):
     """첨부 목록을 다운로드+텍스트 추출하고 sha256 목록을 반환한다.
 
     각 항목 dict에 download_status/extract_status/extract_reason/local_path/
     sha256/text_path를 기록한다. robots_allowed(url)->bool이 주어지면 불허 경로는
     요청 없이 skipped_robots로 남긴다 (우회 금지 원칙).
+
+    subdir(공고 식별자)를 주면 download_dir/<정제된 subdir>/ 아래에 저장한다 —
+    여러 공고가 같은 폴더를 쓸 때 동명 첨부(00_공고문.hwp)가 서로 덮어써
+    기존 레코드의 sha256/local_path와 실제 파일이 어긋나는 것을 막는다.
+    (같은 폴더 안의 잔여 충돌은 download_attachment의 no-clobber 접미사가 막는다.)
     """
     import attach_extract  # 같은 디렉토리의 추출기 — 추출 성공까지 확인해야 complete
     d = pathlib.Path(download_dir).resolve()
+    if subdir:
+        d = d / re.sub(r"[^\w.\-가-힣]", "_", str(subdir))[:80]
     d.mkdir(parents=True, exist_ok=True)
     attach_hashes = []
     for idx, f in enumerate(attachments):

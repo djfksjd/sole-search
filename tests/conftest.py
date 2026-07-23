@@ -38,6 +38,11 @@ def attach():
 
 
 @pytest.fixture(scope="session")
+def gov24():
+    return _load("gov24_crawl")
+
+
+@pytest.fixture(scope="session")
 def diff():
     return _load("diff_surveys")
 

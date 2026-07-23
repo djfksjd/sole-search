@@ -628,7 +628,8 @@ def cmd_detail(args):
             try:
                 attach_hashes = _ad.process_attachments(
                     attachments, args.download_dir, args.delay, (domain,), UA,
-                    robots_allowed=robots_allowed_for(domain))
+                    robots_allowed=robots_allowed_for(domain),
+                    subdir=f"{source}_{sid}")  # 공고별 폴더 — 동명 첨부 충돌 방지
             except ManualEscalation as e:
                 print(f"MANUAL {source} attachment: {e}", file=sys.stderr)
                 return 3

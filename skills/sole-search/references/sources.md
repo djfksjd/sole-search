@@ -51,7 +51,10 @@ body: 동일 구조
 #    주의: 대출상품의 pbancSn은 별도 네임스페이스다 — 같은 숫자가 소진공 공고와 겹친다
 #    (실측: combine sn 413 '미소금융 재기자금' vs pbanc sn 413 소공인특화지원센터 공고).
 #    그래서 sbiz_crawl.py detail --source sbiz24_combine 은 --merge-into(목록 jsonl) 필수:
-#    raw.bizType=='대출상품' 거부 + 상세 응답 제목 vs 목록 제목 정규화 비교(불일치 시 exit 2).
+#    1차 게이트는 raw.pbancGubun 코드 기반 — A/D만 허용, C·미지 코드·부재는 exit 2
+#    (bizType 문자열은 보조 검사: '대출상품'이면 코드와 무관하게 거부).
+#    추가로 상세 응답 pbancSn==요청 sn 검증(불일치 시 exit 2, 병합 키는 요청 sn) +
+#    상세 응답 제목 vs 목록 제목 정규화 비교(불일치 시 exit 2).
 POST https://www.sbiz24.kr/api/pbanc/{pbancSn}
 body: {}
 

@@ -382,13 +382,31 @@ def cmd_detail(args):
             print(f"ERROR: {args.merge_into} 에 sbiz24_combine/{sn} 레코드 없음 — "
                   "combine 목록 jsonl로 다시 시도하라 (fail-closed)", file=sys.stderr)
             return 2
-        if (list_rec.get("raw") or {}).get("bizType") == "대출상품":
-            print(f"ERROR: {sn} 은 대출상품(/loanProduct 네임스페이스) — pbanc 상세 API로 "
-                  "읽으면 다른 공고를 읽는다. 계약 미확인, canonical_url로 수동 확인하라 "
-                  "(fail-closed)", file=sys.stderr)
+        raw = list_rec.get("raw") or {}
+        gubun = raw.get("pbancGubun")
+        # 1차 게이트는 라우팅 코드(pbancGubun) 기반이다 — bizType 문자열은 표기가
+        # 바뀌거나 누락될 수 있어 보조 검사로만 쓴다. A(공단)·D(지방정부)만 허용,
+        # C(대출상품)·B(PBLN은 위에서 분기)·미지 코드·부재는 전부 fail-closed.
+        if gubun not in ("A", "D"):
+            what = f"pbancGubun={gubun!r}" if gubun is not None else \
+                "pbancGubun 부재(구버전 목록 jsonl — list combine 재수집 필요)"
+            print(f"ERROR: {sn} 은 {what} — pbanc 상세 API 공유가 검증된 코드는 "
+                  "A(공단)·D(지방정부)뿐이다. C(대출상품)는 별도 sn 네임스페이스라 "
+                  "다른 공고를 읽는다. canonical_url로 수동 확인하라 (fail-closed)",
+                  file=sys.stderr)
+            return 2
+        if raw.get("bizType") == "대출상품":  # 보조 검사 — 코드/표기 불일치도 거부
+            print(f"ERROR: {sn} 은 bizType=대출상품(/loanProduct 네임스페이스) — "
+                  f"pbancGubun={gubun!r}와 모순, 계약 미확인. canonical_url로 수동 "
+                  "확인하라 (fail-closed)", file=sys.stderr)
             return 2
     detail_data = post(f"/api/pbanc/{args.pbanc_sn}", {})
     detail = parse_detail(detail_data)
+    if detail["source_id"] != sn:
+        print(f"ERROR: 상세 응답 pbancSn({detail['source_id']!r})이 요청 sn({sn!r})과 "
+              "불일치 — 잘못된 레코드에 병합될 수 있어 기록하지 않는다 (fail-closed)",
+              file=sys.stderr)
+        return 2
     if list_rec is not None and _norm_title(detail["title"]) != _norm_title(
             list_rec.get("title")):
         print(f"ERROR: 상세 제목({detail['title'][:40]!r})이 목록 제목"
@@ -469,7 +487,8 @@ def cmd_detail(args):
         print(text)
     rc = 0
     if args.merge_into:
-        merged = merge_detail(args.merge_into, detail["source_id"], detail["content_hash"],
+        # 병합 키는 요청 sn 기준 — 응답 ID는 위에서 요청 sn과 일치 검증됨
+        merged = merge_detail(args.merge_into, sn, detail["content_hash"],
                               detail["attachments"], complete, source=args.source)
         if not merged:
             print(f"WARNING: source_id={detail['source_id']} 레코드를 "

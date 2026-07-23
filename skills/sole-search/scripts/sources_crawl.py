@@ -360,11 +360,12 @@ def download_attachment(url, dirpath, fallback_name, idx):
                                    BIZINFO_DETAIL_HOSTS, UA)
 
 
-def process_attachments(attachments, download_dir, delay):
-    """attach_download.process_attachments 위임 — robots 불허 경로는 skipped_robots."""
+def process_attachments(attachments, download_dir, delay, subdir=None):
+    """attach_download.process_attachments 위임 — robots 불허 경로는 skipped_robots.
+    subdir(공고 식별자)로 공고별 폴더를 분리해 동명 첨부 덮어쓰기를 막는다."""
     return _ad.process_attachments(attachments, download_dir, delay,
                                    BIZINFO_DETAIL_HOSTS, UA,
-                                   robots_allowed=robots_allowed)
+                                   robots_allowed=robots_allowed, subdir=subdir)
 
 
 def cmd_detail(args):
@@ -395,9 +396,12 @@ def cmd_detail(args):
         hash_version = HASH_VERSION
         complete = not attachments  # 링크만 수집: 첨부가 있으면 아직 미추출
         if args.download_dir and attachments:
+            m = re.search(r"pblancId=(PBLN_\d+)", url)
+            rec_dir = m.group(1) if m else re.sub(r"\W+", "_",
+                                                  url.split("://", 1)[1])[:60]
             try:
                 attach_hashes = process_attachments(attachments, args.download_dir,
-                                                    args.delay)
+                                                    args.delay, subdir=rec_dir)
             except ManualEscalation as e:
                 print(f"MANUAL bizinfo attachment: {e}", file=sys.stderr)
                 return 3

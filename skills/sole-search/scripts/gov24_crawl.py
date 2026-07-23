@@ -201,6 +201,12 @@ def cmd_list(args, key):
                 print("WARNING gov24: totalCount=0 — API 구조 변경/장애 신호, "
                       "failed로 기록", file=sys.stderr)
                 return 2
+        if page == 1 and not data and total > 0:
+            # totalCount>0인데 첫 페이지가 빈 배열 = 파서/API 파손 신호 — CI 스모크가
+            # 녹색으로 지나가면 안 된다 ("0건 파싱은 실패" 계약, sources.md §10)
+            print(f"WARNING gov24: totalCount={total}인데 첫 페이지 data 0건 — "
+                  "API 구조 변경/장애 신호, failed로 기록", file=sys.stderr)
+            return 2
         if page == 1 and data:
             probe = to_record(data[0])
             if probe is None:

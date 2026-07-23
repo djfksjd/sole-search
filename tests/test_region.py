@@ -362,3 +362,47 @@ def test_fanfan_max_pages_skips_year_loop_and_caps_board(monkeypatch, region,
     board_calls = [c for c in calls if "readUcenterNtcBbs" in c[0]]
     assert len(ajax_calls) == 1  # 연도 순회 없음
     assert len(board_calls) == 1  # 게시판 첫 페이지만
+
+
+def test_detail_multi_url_same_download_dir_no_clobber(monkeypatch, region,
+                                                       fixtures_dir, tmp_path):
+    """여러 공고를 같은 --download-dir로 처리해도 동명 첨부가 서로를 덮지 않는다
+    — 레코드별 sha256/local_path와 실제 파일 내용이 일치해야 한다 (Codex NO-GO 4)."""
+    import hashlib
+    import pathlib
+    html1 = (fixtures_dir / "ssb_detail.html").read_text()
+    html2 = html1.replace("view/5001.do", "view/5002.do")  # 같은 첨부 파일명
+    url2 = SSB_DETAIL_URL.replace("view/5001.do", "view/5002.do")
+    bodies = {"5001": make_hwpx_bytes("공고 5001 본문"),
+              "5002": make_hwpx_bytes("공고 5002 본문")}
+
+    monkeypatch.setattr(region, "fetch",
+                        lambda url, data=None, retries=3:
+                        html2 if "5002" in url else html1)
+
+    def fake_urlopen(req, timeout=60):
+        bno = "5002" if "/5002/" in req.full_url else "5001"
+        return FakeResponse(bodies[bno], req.full_url, filename="공고문.hwpx")
+
+    monkeypatch.setattr(urllib.request, "urlopen", fake_urlopen)
+    recs = [{"source": "seoulshinbo", "source_id": f"ntc-{b}", "title": "t",
+             "content_hash": None, "attachments": [], "attachments_complete": False}
+            for b in ("5001", "5002")]
+    (tmp_path / "ssb.jsonl").write_text(
+        "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in recs))
+    args = argparse.Namespace(
+        urls=[SSB_DETAIL_URL, url2], output=str(tmp_path / "details"),
+        merge_into=str(tmp_path / "ssb.jsonl"),
+        download_dir=str(tmp_path / "att"), delay=0.5)
+    assert region.cmd_detail(args) == 0
+    merged = {json.loads(l)["source_id"]: json.loads(l)
+              for l in (tmp_path / "ssb.jsonl").read_text().splitlines()}
+    a1 = merged["ntc-5001"]["attachments"][0]
+    a2 = merged["ntc-5002"]["attachments"][0]
+    assert a1["local_path"] != a2["local_path"]  # 공고별 폴더 분리
+    for a, bno in ((a1, "5001"), (a2, "5002")):
+        data = pathlib.Path(a["local_path"]).read_bytes()
+        assert data == bodies[bno]  # 파일 내용이 해당 레코드의 것 그대로
+        assert a["sha256"] == hashlib.sha256(bodies[bno]).hexdigest()
+    assert merged["ntc-5001"]["content_hash"] != merged["ntc-5002"]["content_hash"]
+    assert all(m["hash_version"] == 3 for m in merged.values())
