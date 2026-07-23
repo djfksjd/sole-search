@@ -48,9 +48,12 @@ fi
 # Also serves as the fallback when no host CLI was detected.
 SKILL_DIR="${HOME}/.agents/skills/sole-search"
 if [ -d "${SKILL_DIR}/.git" ]; then
-  git -C "${SKILL_DIR}" pull --ff-only >/dev/null 2>&1 \
-    && log "✓ ~/.agents/skills/sole-search 갱신 (Cursor·Grok Build 등)" \
-    || warn "✗ ~/.agents/skills/sole-search 갱신 실패 — 수동으로 git pull 하세요"
+  if git -C "${SKILL_DIR}" pull --ff-only >/dev/null 2>&1; then
+    log "✓ ~/.agents/skills/sole-search 갱신 (Cursor·Grok Build 등)"
+    INSTALLED=$((INSTALLED + 1))
+  else
+    warn "✗ ~/.agents/skills/sole-search 갱신 실패 — 수동으로 git pull 하세요"
+  fi
 elif [ ! -e "${SKILL_DIR}" ]; then
   mkdir -p "${HOME}/.agents/skills"
   if git clone --quiet "${REPO_URL}" "${SKILL_DIR}"; then

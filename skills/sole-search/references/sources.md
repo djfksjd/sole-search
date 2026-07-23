@@ -78,7 +78,13 @@ bizType(유관기관지원사업 등, 통합조회), pbancId(통합조회), hstg
 출력은 sole-search 공통 스키마(source_id=PBLN_*, canonical_url, agency, status...)다.
 상세: `sources_crawl.py detail <URL> --merge-into bizinfo.jsonl` — 본문 텍스트·첨부 링크를
 저장하고 목록 레코드에 content_hash·attachments를 병합한다. content_hash는 **hash v2**
-(시작 마커~푸터 마커 절단, `hash_version: 2` 병합 — v1과 비교 불가, diff는 NEEDS_REHASH 처리).
+(시작 마커~푸터 마커 절단, `hash_version: 2` 병합 — v1과 비교 불가, diff는 1회 CHANGED로 전환).
+`detail --download-dir DIR`로 첨부를 **전부** 다운로드에 성공하면 **hash v3**(본문 +
+정렬된 첨부 sha256, `hash_version: 3`)를 스탬프한다 — v2와 비교 불가라 diff가 1회 CHANGED로
+흡수한다. 다운로드하지 않거나 일부 첨부가 실패·생략되면 **본문만의 v2 해시를 유지**하고
+`attachments_complete: false` + exit 2로 첨부 미검증을 표현한다(해시를 None으로 지우면
+반복 실패 시 본문 변경이 diff에서 숨는다). robots.txt가 `/upload`·`/download`
+프리픽스를 불허하므로 `/uploads/` 첨부는 링크만 수집하고 다운로드하지 않는다(skipped_robots).
 첨부 링크가 있는데 아직 추출하지 않았으면 `attachments_complete: false`로 남는다
 (그 후보는 '확인됨' 금지).
 

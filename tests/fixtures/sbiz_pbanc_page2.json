@@ -1,0 +1,21 @@
+{
+  "result": true,
+  "data": {
+    "default": {
+      "total": 3,
+      "list": [
+        {
+          "pbancSn": 102,
+          "pbancNm": "소상공인 교육 바우처",
+          "rcrtTypeCdNm": "소상공인",
+          "rcptPd": {"from": "2026-06-01", "to": "2026-06-30"},
+          "aplyPsbltySe": "N",
+          "regionNmList": "서울",
+          "hstgNm": "교육",
+          "ddlnDayCnt": 0
+        }
+      ],
+      "page": {}
+    }
+  }
+}

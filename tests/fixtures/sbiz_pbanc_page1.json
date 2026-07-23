@@ -1,0 +1,31 @@
+{
+  "result": true,
+  "data": {
+    "default": {
+      "total": 3,
+      "list": [
+        {
+          "pbancSn": 101,
+          "pbancNm": "소상공인 시설개선 지원",
+          "rcrtTypeCdNm": "소상공인",
+          "rcptPd": {"from": "2026-07-01", "to": "2027-08-01"},
+          "aplyPsbltySe": "Y",
+          "regionNmList": "전국",
+          "hstgNm": "시설개선, 보조금",
+          "ddlnDayCnt": 30
+        },
+        {
+          "pbancSn": 102,
+          "pbancNm": "소상공인 교육 바우처",
+          "rcrtTypeCdNm": "소상공인",
+          "rcptPd": {"from": "2026-06-01", "to": "2026-06-30"},
+          "aplyPsbltySe": "N",
+          "regionNmList": "서울",
+          "hstgNm": "교육",
+          "ddlnDayCnt": 0
+        }
+      ],
+      "page": {}
+    }
+  }
+}

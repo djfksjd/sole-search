@@ -318,6 +318,9 @@ def download_capped(url, path):
         raise
 
 
+HASH_VERSION = 2  # sources/region_crawl과 동일 산식 세대 — diff의 산식 전환 감지에 필요
+
+
 def content_hash_of(body_text, attachment_hashes):
     payload = body_text + "\n" + "\n".join(sorted(attachment_hashes))
     return hashlib.sha256(payload.encode()).hexdigest()
@@ -439,6 +442,11 @@ def merge_detail(jsonl_path, source_id, content_hash, attachments, complete, sou
             r = json.loads(line)
             if r.get("source") == source and str(r.get("source_id")) == str(source_id):
                 r["content_hash"] = content_hash
+                if content_hash is not None:
+                    r["hash_version"] = HASH_VERSION
+                else:
+                    # 해시 없음 = 산식 버전도 무의미 — 낡은 version 잔존 금지
+                    r.pop("hash_version", None)
                 r["attachments"] = attachments
                 r["attachments_complete"] = complete
                 found = True
