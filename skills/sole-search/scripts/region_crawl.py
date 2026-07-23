@@ -16,6 +16,10 @@ seoulsbdc·ggbaro·gmr·보조금24(gov.kr)는 robots 전면/게시판 불허로
 정상으로 본다(마감·연도 필터가 없는 누적 게시판이라 bizinfo와 달리 총건수 계약이 약함).
 공고 접수기간이 목록에 없는 레코드는 status "불명"으로 남긴다 — 상세 확인 대상.
 
+content_hash는 **hash v2**(v1과 비교 불가 — diff는 hash_version 불일치를 NEEDS_REHASH로
+처리): 순수 숫자 줄 제거를 본문 시작 3줄 이내(조회수 위치)로 한정해 본문 숫자를 보존한다.
+detail 병합 레코드에 `hash_version: 2` 부여.
+
 사용법:
   python3 region_crawl.py list fanfan -o fanfandaero.jsonl [--since YYYY-MM-DD]
   python3 region_crawl.py list seoulshinbo -o seoulshinbo.jsonl [--since YYYY-MM-DD]
@@ -123,6 +127,35 @@ def clean(s):
     return re.sub(r"\s+", " ", htmllib.unescape(s or "")).strip()
 
 
+def norm_date(s):
+    """sources_crawl.py의 날짜 정규화 로직 사본 — posted를 YYYY-MM-DD로 통일."""
+    s = clean(s)
+    m = re.search(r"(\d{4})[.\-/\s]+(\d{1,2})[.\-/\s]+(\d{1,2})", s)
+    if m:
+        return f"{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    m = re.search(r"(\d{2})[.\-/](\d{1,2})[.\-/](\d{1,2})", s)
+    if m:
+        return f"20{m.group(1)}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
+    return s
+
+
+def cutoff_reached(new_items, since, source, warned):
+    """--since 컷오프 도달 판정. posted 정규화 실패가 섞이면 판정 불가 —
+    전수 크롤로 전환하고(False 반환) WARNING을 한 번만 출력한다."""
+    if not since:
+        return False
+    for i in new_items:
+        p = i["raw"].get("posted") or ""
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", p):
+            if not warned[0]:
+                print(f"WARNING {source}: posted 정규화 실패({p!r}) — "
+                      "컷오프 판정 불가 — 전수 크롤 전환", file=sys.stderr)
+                warned[0] = True
+            return False
+    return bool(new_items) and all(
+        (i["raw"].get("posted") or "9999") < since for i in new_items)
+
+
 def now_kst():
     return datetime.now(KST).strftime("%Y-%m-%dT%H:%M:%S+09:00")
 
@@ -182,7 +215,7 @@ NTC_ROW = re.compile(
 def parse_fanfan_ntc(h):
     items = []
     for ntt, title, date in NTC_ROW.findall(h):
-        posted = clean(date)[:10]
+        posted = norm_date(date)[:10]
         items.append(base_record(
             "fanfandaero", f"ntc-{ntt}",
             f"{FANFAN}/portal/v2/readUcenterNtcBbsView.do?nttId={ntt}",
@@ -205,12 +238,21 @@ def cmd_list_fanfan(args):
     years = first.get("years") or []
     for it in parse_fanfan_biz(first):
         collected[it["source_id"]] = it
-    for y in years:
-        time.sleep(args.delay)
-        payload = json.loads(fetch(f"{FANFAN}/portal/v2/selectSupportInfoListAjax.do",
-                                   data={"sprtBizTyCd": "", "sprtBizYr": y}))
-        for it in parse_fanfan_biz(payload):
-            collected.setdefault(it["source_id"], it)
+    try:
+        for y in years:
+            time.sleep(args.delay)
+            payload = json.loads(fetch(f"{FANFAN}/portal/v2/selectSupportInfoListAjax.do",
+                                       data={"sprtBizTyCd": "", "sprtBizYr": y}))
+            for it in parse_fanfan_biz(payload):
+                collected.setdefault(it["source_id"], it)
+    except ManualEscalation:
+        write_jsonl(args.output, collected.values())
+        raise
+    except (RuntimeError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+        print(f"WARNING fanfan: 사업 목록 연도 순회 중단 ({e}) — 수집분 저장, partial",
+              file=sys.stderr)
+        write_jsonl(args.output, collected.values())
+        return 2
     biz_n = len(collected)
     print(f"[sole-search] fanfan biz: {biz_n} (years {years})", file=sys.stderr)
     if biz_n == 0:
@@ -219,36 +261,49 @@ def cmd_list_fanfan(args):
         return 2
 
     # 2) 공지사항 게시판(세부·수시 모집공고 포함) — 서버렌더, pageIndex POST
+    # 중도 실패 시에도 biz 수집분+게시판 수집분은 jsonl로 저장한다 (partial, 조용한 유실 금지)
     page, pages, total, stop = 1, 0, None, False
-    while not stop:
-        h = fetch(f"{FANFAN}/portal/v2/readUcenterNtcBbs.do",
-                  data={"pageIndex": page, "searchMode": "title", "searchTxt": ""})
-        if total is None:
-            total = fanfan_ntc_total(h)
-        items = parse_fanfan_ntc(h)
-        if page == 1 and not items:
-            print("WARNING fanfan: 게시판 첫 페이지 파싱 0건 — 구조 변경 가능성, partial",
+    partial = False
+    warned = [False]
+    try:
+        while not stop:
+            h = fetch(f"{FANFAN}/portal/v2/readUcenterNtcBbs.do",
+                      data={"pageIndex": page, "searchMode": "title", "searchTxt": ""})
+            if total is None:
+                total = fanfan_ntc_total(h)
+            items = parse_fanfan_ntc(h)
+            if page == 1 and not items:
+                print("WARNING fanfan: 게시판 첫 페이지 파싱 0건 — 구조 변경 가능성, partial",
+                      file=sys.stderr)
+                partial = True
+                break
+            new = [i for i in items if i["source_id"] not in collected]
+            for i in new:
+                collected[i["source_id"]] = i
+            pages = page
+            print(f"[sole-search] fanfan ntc p{page}: {len(items)} parsed, {len(new)} new",
                   file=sys.stderr)
-            return 2
-        new = [i for i in items if i["source_id"] not in collected]
-        for i in new:
-            collected[i["source_id"]] = i
-        pages = page
-        print(f"[sole-search] fanfan ntc p{page}: {len(items)} parsed, {len(new)} new",
+            if not new:
+                break
+            # 컷오프는 신규 행 기준 — 상단고정글은 매 페이지 반복되므로 items로 보면 안 멈춘다
+            if cutoff_reached(new, args.since, "fanfan", warned):
+                stop = True  # 게시판은 최신순 — 컷오프 이전 페이지만 남음
+            page += 1
+            time.sleep(args.delay)
+    except ManualEscalation:
+        write_jsonl(args.output, collected.values())  # 수집분 보존 후 manual 전환
+        raise
+    except (RuntimeError, urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
+        print(f"WARNING fanfan: 게시판 p{page} 수집 중단 ({e}) — 수집분 저장, partial",
               file=sys.stderr)
-        if not new:
-            break
-        # 컷오프는 신규 행 기준 — 상단고정글은 매 페이지 반복되므로 items로 보면 안 멈춘다
-        if args.since and all((i["raw"].get("posted") or "9999") < args.since
-                              for i in new):
-            stop = True  # 게시판은 최신순 — 컷오프 이전 페이지만 남음
-        page += 1
-        time.sleep(args.delay)
+        partial = True
 
     ntc_n = len(collected) - biz_n
     write_jsonl(args.output, collected.values())
     print(f"PAGES {pages} COLLECTED {len(collected)} BIZ {biz_n} NTC {ntc_n} "
           f"NTC_TOTAL {total if total is not None else '?'}", file=sys.stderr)
+    if partial:
+        return 2
     if not args.since and total is not None and ntc_n < total:
         print(f"WARNING fanfan: 게시판 총 {total}건 대비 {ntc_n}건 — partial",
               file=sys.stderr)
@@ -268,7 +323,8 @@ def parse_ssb(h):
     for bno, title, rest in SSB_ROW.findall(h):
         tds = [clean(re.sub(r"<[^>]+>", " ", td))
                for td in re.findall(r"<td[^>]*>([\s\S]*?)</td>", rest)]
-        posted = next((t for t in tds if re.fullmatch(r"\d{4}-\d{2}-\d{2}", t)), "")
+        posted = next((t for t in map(norm_date, tds)
+                       if re.fullmatch(r"\d{4}-\d{2}-\d{2}", t)), "")
         dept = tds[0] if tds else ""
         sid = f"ntc-{bno}"
         if any(i["source_id"] == sid for i in items):
@@ -283,32 +339,52 @@ def parse_ssb(h):
     return items
 
 
+SSB_EXPECTED_ROWS = 10  # 페이지당 신규 10건 (sources.md §7)
+
+
 def cmd_list_ssb(args):
     collected, page, pages, stop = {}, 1, 0, False
-    while not stop:
-        h = fetch(f"{SSB}/wbase/contents/bbs/list.do?mng_cd={SSB_MNG}&pageIndex={page}")
-        items = parse_ssb(h)
-        if page == 1 and not items:
-            print("WARNING seoulshinbo: 첫 페이지 파싱 0건 — 구조 변경 가능성, partial",
+    partial = False
+    warned = [False]
+    page_counts = []  # 페이지별 파싱 행수 — 마지막 페이지 제외하고 절반 미만이면 partial
+    try:
+        while not stop:
+            h = fetch(f"{SSB}/wbase/contents/bbs/list.do?mng_cd={SSB_MNG}&pageIndex={page}")
+            items = parse_ssb(h)
+            if page == 1 and not items:
+                print("WARNING seoulshinbo: 첫 페이지 파싱 0건 — 구조 변경 가능성, partial",
+                      file=sys.stderr)
+                return 2
+            new = [i for i in items if i["source_id"] not in collected]
+            for i in new:
+                collected[i["source_id"]] = i
+            pages = page
+            page_counts.append(len(items))
+            print(f"[sole-search] seoulshinbo p{page}: {len(items)} parsed, {len(new)} new",
                   file=sys.stderr)
-            return 2
-        new = [i for i in items if i["source_id"] not in collected]
-        for i in new:
-            collected[i["source_id"]] = i
-        pages = page
-        print(f"[sole-search] seoulshinbo p{page}: {len(items)} parsed, {len(new)} new",
+            if not new:
+                break
+            # 컷오프는 신규 행 기준 — 상단고정글은 매 페이지 반복되므로 items로 보면 안 멈춘다
+            if cutoff_reached(new, args.since, "seoulshinbo", warned):
+                stop = True
+            page += 1
+            time.sleep(args.delay)
+    except ManualEscalation:
+        write_jsonl(args.output, collected.values())  # 수집분 보존 후 manual 전환
+        raise
+    except (RuntimeError, urllib.error.URLError, TimeoutError) as e:
+        print(f"WARNING seoulshinbo: p{page} 수집 중단 ({e}) — 수집분 저장, partial",
               file=sys.stderr)
-        if not new:
-            break
-        # 컷오프는 신규 행 기준 — 상단고정글은 매 페이지 반복되므로 items로 보면 안 멈춘다
-        if args.since and all((i["raw"].get("posted") or "9999") < args.since
-                              for i in new):
-            stop = True
-        page += 1
-        time.sleep(args.delay)
+        partial = True
+    # 마지막 페이지(짧을 수 있음) 제외, 기대 행수의 절반 미만 파싱 페이지 = 파서 누락 의심
+    thin = [c for c in page_counts[:-1] if c < SSB_EXPECTED_ROWS / 2]
+    if thin:
+        print(f"WARNING seoulshinbo: 파싱 행수 {thin} < 기대({SSB_EXPECTED_ROWS})의 절반 — "
+              "행 파싱 누락 의심, partial", file=sys.stderr)
+        partial = True
     write_jsonl(args.output, collected.values())
     print(f"PAGES {pages} COLLECTED {len(collected)}", file=sys.stderr)
-    return 0
+    return 2 if partial else 0
 
 
 # ---------------- 상세 ----------------
@@ -330,6 +406,7 @@ def merge_detail(jsonl_path, source, source_id, content_hash, attachments, compl
             r = json.loads(line)
             if r.get("source") == source and str(r.get("source_id")) == str(source_id):
                 r["content_hash"] = content_hash
+                r["hash_version"] = HASH_VERSION
                 r["attachments"] = attachments
                 r["attachments_complete"] = complete
                 found = True
@@ -358,19 +435,30 @@ END_MARKERS = (r'<div[^>]+id="footer"', r'<footer\b', r'<div[^>]+class="[^"]*foo
                r'다음글|이전글')
 
 
+HASH_VERSION = 2  # hash v2 — 순수 숫자 줄을 본문에서 보존(v1과 비교 불가, diff는 NEEDS_REHASH)
+
+
 def extract_body(h, start_pattern):
-    """시작 마커 ~ 첫 끝 마커 구간의 텍스트. 마커를 못 찾으면 전체 폴백."""
+    """시작 마커 ~ 첫 끝 마커 구간의 텍스트. 마커를 못 찾으면 전체 폴백.
+
+    hash v2: 순수 숫자 줄은 시작 마커 직후 3줄 이내(조회수 위치)만 제거한다 —
+    "상시근로자 5명 미만"류가 아닌 순수 숫자여도 본문 깊숙한 줄은 보존.
+    """
     sm = re.search(start_pattern, h)
     seg = h[sm.start():] if sm else h
     ends = [m.start() for p in END_MARKERS for m in [re.search(p, seg)] if m]
     if ends:
         seg = seg[:min(ends)]
     text = strip_html(seg)
-    # 조회수·등록일시각 등 변동 라인은 해시 안정성을 위해 제거
+    # 조회수·등록일시각 등 변동 라벨 라인은 해시 안정성을 위해 제거
     lines = [ln for ln in text.splitlines()
-             if ln.strip() and not re.fullmatch(r"\s*(조회수?|등록일|작성일)\s*", ln)
-             and not re.fullmatch(r"\s*\d{1,7}\s*", ln)]
-    return "\n".join(lines)
+             if ln.strip() and not re.fullmatch(r"\s*(조회수?|등록일|작성일)\s*", ln)]
+    out = []
+    for idx, ln in enumerate(lines):
+        if idx < 3 and re.fullmatch(r"\s*\d{1,7}\s*", ln):
+            continue  # 시작 3줄 이내의 순수 숫자 = 조회수로 간주
+        out.append(ln)
+    return "\n".join(out)
 
 
 def fanfan_attachments(h, url):
@@ -448,6 +536,7 @@ def cmd_detail(args):
         with open(path, "w", encoding="utf-8") as f:
             f.write(url + "\n")
             f.write("CONTENT_HASH: " + digest + "\n")
+            f.write(f"HASH_VERSION: {HASH_VERSION}\n")
             f.write("ATTACHMENTS: " + json.dumps(attachments, ensure_ascii=False) + "\n\n")
             f.write(text)
         print(f"[sole-search] saved: {path}", file=sys.stderr)

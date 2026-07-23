@@ -5,7 +5,7 @@ description: '운영 중인 소상공인(가게·점포·자영업자)을 위한
 
 # sole-search — 소상공인 지원사업 조사
 
-> **스크립트 위치**: `${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/` (단독 스킬 설치 시 스킬 디렉토리 자체). 아래 명령의 경로 변수를 환경에 맞게 치환해 실행한다.
+> **스크립트 위치**: `${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/` (단독 스킬 설치 시 스킬 디렉토리 자체). 미정의 시 폴백: `~/.claude/skills/sole-search/scripts/`. 아래 명령의 경로 변수를 환경에 맞게 치환해 실행한다.
 
 이 스킬은 "룰베이스 수집 + LLM 판정" 구조다. 스크립트는 공고를 기계적으로 수집만 하고,
 선별·자격 판정·보고서는 에이전트(너)가 한다.
@@ -88,13 +88,19 @@ survey_sources: [sbiz24, sbiz24_combine, bizinfo, fanfandaero]  # 서울이면 +
    ```bash
    python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/diff_surveys.py" \
        <직전_폴더> <새_폴더> --out new_items.jsonl \
-       --old-profile <직전 프로필 사본> --new-profile sole-profile.md
+       --old-profile <직전_폴더>/profile-snapshot.md --new-profile sole-profile.md \
+       --incremental-sources fanfandaero,seoulshinbo
    ```
-3. 검토·상세검증은 `new_items.jsonl`(NEW+CHANGED+NEEDS_REHASH)만. UNCHANGED는 직전 판정 승계.
-   단 **프로필 fingerprint가 바뀌었다는 WARNING이 나오면 전체 재판정**
+   `--incremental-sources`에는 `--since` 컷오프로 수집한 소스를 넣는다 — 그 소스는
+   이전 레코드 부재가 소멸이 아니므로 GONE을 계산하지 않는다
+3. 검토·상세검증은 `new_items.jsonl`(NEW+CHANGED+NEEDS_REHASH)만. GONE은 **별도 파일
+   `gone_new_items.jsonl`**에 기록된다(기회 소멸 알림 재료 — 검토 대상과 섞지 않는다).
+   UNCHANGED는 직전 판정 승계. 단 **프로필 fingerprint가 바뀌었다는 WARNING이 나오면 전체 재판정**
 4. **NEEDS_REHASH** = 직전 조사에 content_hash가 있었는데 새 목록엔 아직 없음. 목록 필드만으로
    같아 보여도 본문·첨부가 바뀌었을 수 있으니 **상세 재수집(`detail --merge-into`) 후 해시를
-   채우고 재비교**한다 — 그때 같으면 승계, 다르면 변경 처리
+   채우고 재비교**한다 — 그때 같으면 승계, 다르면 변경 처리. **hash_version이 다른 경우**(해시
+   산식 v1↔v2)는 값 비교가 불가능하므로 1회 CHANGED로 분류된다 — 상세 재검증하면 이번
+   조사부터 양쪽 v2로 수렴한다
 5. **정책자금(loan) 전체와 직전 `확인됨` 항목은 diff 결과와 무관하게 접수상태를 재확인**
 6. 보고서: 신규 / 변경(마감·조건 — changed_fields 표기) / 소멸된 확인됨 항목(기회 소멸 알림) / 승계 요약.
    WARNING(미갱신 소스)은 coverage_manifest에 "미갱신" 명시
@@ -122,6 +128,9 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/region_crawl.py" list 
 # 보조금24: 선택 소스 (API 키 등록 시에만 — 상시 수혜 제도 커버)
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/gov24_crawl.py" list \
     -o gov24.jsonl --filter-target 소상공인
+
+# 프로필 스냅샷 (필수, 수집 직후) — 다음 diff의 --old-profile 재료
+cp ../sole-profile.md profile-snapshot.md
 ```
 
 게시판형 소스(판판대로 공지·서울신보)는 접수기간이 목록에 없어 status가 `불명`으로
@@ -162,15 +171,23 @@ candidate와 needs_detail 레코드는 상세 원문을 확인한다:
 
 ```bash
 # 소상공인24 상세+첨부 (첨부 자동 다운로드 + 목록 jsonl에 content_hash 병합)
-python3 ".../scripts/sbiz_crawl.py" detail <pbancSn> --download-dir details \
-    -o details/<pbancSn>.json --merge-into sbiz24.jsonl
-# 기업마당 상세 (본문 해시·첨부 링크를 목록에 병합)
-python3 ".../scripts/sources_crawl.py" detail "<URL>" -o details --merge-into bizinfo.jsonl
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/sbiz_crawl.py" detail <pbancSn> \
+    --download-dir details -o details/<pbancSn>.json --merge-into sbiz24.jsonl
+# 기업마당 상세 (본문 해시 v2·첨부 링크를 목록에 병합 — 레코드에 hash_version: 2)
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/sources_crawl.py" detail "<URL>" \
+    -o details --merge-into bizinfo.jsonl
 # 판판대로·서울신보 상세 (canonical_url로 소스 자동 판별, 소스별 jsonl에 병합)
-python3 ".../scripts/region_crawl.py" detail "<canonical_url>" -o details --merge-into <해당소스>.jsonl
-# 첨부 텍스트 추출 (HWP는 실패가 정상 — 그 후보는 '확인 필요')
-python3 ".../scripts/attach_extract.py" details/<파일> -o details/<파일>.txt
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/region_crawl.py" detail \
+    "<canonical_url>" -o details --merge-into <해당소스>.jsonl
+# 첨부 텍스트 추출 (HWP는 hwp5txt→PrvText 미리보기 폴백 — 부분 추출/실패 후보는 '확인 필요')
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/attach_extract.py" \
+    details/<파일> -o details/<파일>.txt
 ```
+
+**sbiz24_combine 레코드의 상세 분기**: ID가 `PBLN_*`이면 기업마당 공고 —
+`sources_crawl.py detail <bizinfo URL>`로 검증한다. `PBLN_*`이 아닌 combine 레코드는
+전용 상세 API가 미확인이라 `sbiz_crawl.py detail`이 exit 2로 거부한다(fail-closed) —
+레코드의 canonical_url로 수동 확인. `sbiz_crawl.py detail`은 sbiz24(pbanc) 전용이다.
 
 판정 상태 5단계:
 
@@ -190,7 +207,8 @@ python3 ".../scripts/attach_extract.py" details/<파일> -o details/<파일>.txt
   직접 신청 대상이 아닌 통합·메타 공고는 선별 단계에서 `excluded`(사유: 메타 공고, 세부공고로 신청) 처리
 - **접수 마감이 확정된 후보는 상세검증을 생략할 수 있다** — 단 보고서에 건수·대표 목록·
   "차기 재조사 우선확인 대상"을 명시한다 (조용한 생략 금지)
-- **첨부를 읽지 못한 후보(`attachments_complete: false` 포함)는 `확인됨` 금지** → `확인 필요` + "첨부 미확인(사유)"
+- **첨부를 읽지 못한 후보(`attachments_complete: false` 포함)는 `확인됨` 금지** → `확인 필요` + "첨부 미확인(사유)".
+  HWP의 PrvText 미리보기 추출(`extract_reason: hwp_preview_only`)은 **부분 추출**이라 여기에 해당한다
 - **status가 `불명`인 레코드는 접수 여부부터 상세에서 확인** — 크롤러는 낙관 추정하지 않는다
 - 크롤러 종료 코드 3(MANUAL)은 차단 신호다 — 재시도하지 말고 해당 소스를 manual로 기록
 - 각 판정에 근거 출처(문서·문구)를 기록
@@ -227,7 +245,9 @@ python3 ".../scripts/attach_extract.py" details/<파일> -o details/<파일>.txt
 - `확인 필요` 판정에 "실무상 문제 가능성 낮음" 류의 추정 보완 문구 없음 — 부족한 항목과 확인 방법만 적는다
 - 사장님용 본문에 내부 식별자(idx, candidate, needs_detail 등) 노출 최소화 — 감사 정보는 산출 파일에 있다
 
-완료 후 프로필의 `last_survey_at`·`last_survey_dir`를 갱신한다.
+완료 후 프로필의 `last_survey_at`·`last_survey_dir`를 갱신하고, **갱신된 현재
+`sole-profile.md`를 조사 폴더에 `profile-snapshot.md`로 복사(cp)한다** (필수 —
+다음 diff의 `--old-profile` 재료, 1단계에서 만든 스냅샷을 덮어써 최종본으로 남긴다).
 
 ## 중단선
 

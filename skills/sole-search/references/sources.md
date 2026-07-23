@@ -42,7 +42,10 @@ body: 동일 구조
  "aplySeYn":"N","sbrPbancYn":"N","itrstPbancYn":"N","departNmList":null,"searchBox":null,
  "departNmListDisplay":"","ptPbancSortBy":null,"pbancNm":null,"regionCdList":[]}
 
-# 3) 소진공 공고 상세 (pbancDtlCn = 본문 HTML)
+# 3) 소진공 공고 상세 (pbancDtlCn = 본문 HTML) — sbiz24(pbanc) 전용.
+#    combine 레코드: PBLN_* 은 기업마당이므로 sources_crawl.py detail로,
+#    그 외는 전용 상세 API 계약 미확인 — sbiz_crawl.py detail이 exit 2로 거부(fail-closed),
+#    canonical_url로 수동 확인한다.
 POST https://www.sbiz24.kr/api/pbanc/{pbancSn}
 body: {}
 
@@ -74,8 +77,10 @@ bizType(유관기관지원사업 등, 통합조회), pbancId(통합조회), hstg
 
 출력은 sole-search 공통 스키마(source_id=PBLN_*, canonical_url, agency, status...)다.
 상세: `sources_crawl.py detail <URL> --merge-into bizinfo.jsonl` — 본문 텍스트·첨부 링크를
-저장하고 목록 레코드에 content_hash·attachments를 병합한다. 첨부 링크가 있는데 아직
-추출하지 않았으면 `attachments_complete: false`로 남는다 (그 후보는 '확인됨' 금지).
+저장하고 목록 레코드에 content_hash·attachments를 병합한다. content_hash는 **hash v2**
+(시작 마커~푸터 마커 절단, `hash_version: 2` 병합 — v1과 비교 불가, diff는 NEEDS_REHASH 처리).
+첨부 링크가 있는데 아직 추출하지 않았으면 `attachments_complete: false`로 남는다
+(그 후보는 '확인됨' 금지).
 
 ## 3. 소진공 정책자금 — 필수
 

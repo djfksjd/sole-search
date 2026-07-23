@@ -7,6 +7,10 @@ ir-search의 검증된 bizinfo 파서를 이식·개조했다. 차이점:
   - 표준 라이브러리만 사용, 요청 간 딜레이 최소 0.5초 강제
   - fail-closed: 첫 페이지 0건 파싱·페이지네이션 미발견은 실패(2),
     401/403/CAPTCHA 의심은 MANUAL(3)로 종료
+  - content_hash는 **hash v2**: 본문을 시작 마커(view_cont/print_area)부터 푸터성
+    마커(또는 문서 끝)까지 절단해 태그 제거 후 해시한다. v1(중첩 div의 첫 </div>에서
+    절단되던 방식)과 비교 불가 — diff_surveys.py가 hash_version 불일치를 NEEDS_REHASH로
+    처리한다. detail 병합 레코드에 `hash_version: 2` 필드를 부여한다.
 
 사용법:
   python3 sources_crawl.py list -o bizinfo.jsonl [--delay 0.5]
@@ -186,6 +190,30 @@ def strip_html(text):
     return re.sub(r"\n\s*\n+", "\n", text)
 
 
+HASH_VERSION = 2
+
+# 본문 시작 마커 — 여는 태그만 잡는다 (중첩 div를 regex로 균형 매칭할 수 없으므로)
+START_MARKERS = (r'<div[^>]+class="[^"]*view_cont[^"]*"', r'<div[^>]+id="print_area"')
+# 본문 끝 마커 — 시작 마커부터 푸터/다음 주요 섹션까지를 본문으로 자른다
+END_MARKERS = (r'<div[^>]+id="footer"', r'<footer\b', r'<div[^>]+class="[^"]*footer',
+               r'<div[^>]+class="[^"]*btn_area', r'<div[^>]+class="[^"]*paging',
+               r'목록으로|이전글|다음글')
+
+
+def extract_body(h):
+    """시작 마커 ~ 첫 끝 마커(없으면 문서 끝) 구간의 텍스트. 마커 미발견 시 전체 폴백."""
+    sm = None
+    for p in START_MARKERS:
+        sm = re.search(p, h)
+        if sm:
+            break
+    seg = h[sm.start():] if sm else h
+    ends = [m.start() for p in END_MARKERS for m in [re.search(p, seg)] if m]
+    if ends:
+        seg = seg[:min(ends)]
+    return strip_html(seg)
+
+
 def cmd_list(args):
     try:
         first = fetch(build_list_url(1))
@@ -262,6 +290,7 @@ def merge_detail(jsonl_path, source_id, content_hash, attachments, complete, sou
             r = json.loads(line)
             if r.get("source") == source and str(r.get("source_id")) == str(source_id):
                 r["content_hash"] = content_hash
+                r["hash_version"] = HASH_VERSION
                 r["attachments"] = attachments
                 r["attachments_complete"] = complete
                 found = True
@@ -291,16 +320,15 @@ def cmd_detail(args):
             continue
         attach = [htmllib.unescape(u) for u in
                   re.findall(r'href="(/cmm/fms/[^"]+|/uploads/[^"]+)"', h)]
-        # 본문 컨테이너만 해시 (메뉴·조회수 등 변동값 배제); 못 찾으면 전체 폴백
-        body_m = re.search(r'<div[^>]+class="[^"]*view_cont[^"]*"[\s\S]*?</div>', h) \
-            or re.search(r'<div[^>]+id="print_area"[\s\S]*?</div>', h)
-        text = strip_html(body_m.group(0) if body_m else h)
+        # 본문 컨테이너 시작~푸터 마커 구간만 해시 (hash v2 — 메뉴·조회수 등 변동값 배제)
+        text = extract_body(h)
         digest = hashlib.sha256(text.encode()).hexdigest()
         name = re.sub(r"\W+", "_", url.split("://", 1)[1])[:80]
         path = f"{args.output}/{name}.txt"
         with open(path, "w", encoding="utf-8") as f:
             f.write(url + "\n")
             f.write("CONTENT_HASH: " + digest + "\n")
+            f.write(f"HASH_VERSION: {HASH_VERSION}\n")
             f.write("ATTACHMENTS: " + json.dumps(
                 [BASE + a for a in attach], ensure_ascii=False) + "\n\n")
             f.write(text)
