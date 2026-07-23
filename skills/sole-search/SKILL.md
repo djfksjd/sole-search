@@ -181,17 +181,26 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/sbiz_crawl.py" detail 
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/sources_crawl.py" detail "<URL>" \
     -o details --merge-into bizinfo.jsonl
 # 판판대로·서울신보 상세 (canonical_url로 소스 자동 판별, 소스별 jsonl에 병합)
+#   --download-dir details 를 붙이면 첨부까지 다운로드·추출한다 (bizinfo와 동일 계약:
+#   전부 성공 시 hash v3, 일부 실패·생략 시 본문 v2 유지 + attachments_complete: false
+#   + exit 2). 서울신보는 연속 다운로드 시 서버가 http 리다이렉트로 막는 경우가 있다 —
+#   blocked_redirect로 남으면 재실행하거나 수동 확인
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/region_crawl.py" detail \
-    "<canonical_url>" -o details --merge-into <해당소스>.jsonl
+    "<canonical_url>" -o details --merge-into <해당소스>.jsonl [--download-dir details]
 # 첨부 텍스트 추출 (HWP는 hwp5txt→PrvText 미리보기 폴백 — 부분 추출/실패 후보는 '확인 필요')
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/attach_extract.py" \
     details/<파일> -o details/<파일>.txt
 ```
 
-**sbiz24_combine 레코드의 상세 분기**: ID가 `PBLN_*`이면 기업마당 공고 —
-`sources_crawl.py detail <bizinfo URL>`로 검증한다. `PBLN_*`이 아닌 combine 레코드는
-전용 상세 API가 미확인이라 `sbiz_crawl.py detail`이 exit 2로 거부한다(fail-closed) —
-레코드의 canonical_url로 수동 확인. `sbiz_crawl.py detail`은 sbiz24(pbanc) 전용이다.
+**sbiz24_combine 레코드의 상세 분기** (계약: references/sources.md §1):
+- ID가 `PBLN_*` → 기업마당 공고 — `sources_crawl.py detail <bizinfo URL>`로 검증
+- 비PBLN·비대출(`raw.pbancGubun`이 A(공단)/D(지방정부)) → `sbiz_crawl.py detail <sn>
+  --source sbiz24_combine --merge-into sbiz24.jsonl` — pbanc 상세 API를 공유한다
+  (2026-07-23 실호출 검증). **--merge-into 필수**: 목록 레코드의 pbancGubun 게이트 +
+  상세 응답 sn·제목 대조를 통과해야 병합한다(불일치 시 exit 2, 조용한 오독 금지)
+- `raw.pbancGubun`이 C(대출상품)·미지 코드·부재(구버전 목록) → 별도 네임스페이스/계약
+  미확인이라 exit 2로 거부(fail-closed) — canonical_url로 수동 확인.
+  bizType=`대출상품` 문자열도 보조 검사로 거부된다
 
 판정 상태 5단계:
 

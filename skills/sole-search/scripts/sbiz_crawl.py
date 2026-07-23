@@ -7,15 +7,23 @@
 
 사용법:
   python3 sbiz_crawl.py list [pbanc|combine|all] -o out.jsonl [--page-size 100] [--delay 0.5]
+      [--max-pages N]
   python3 sbiz_crawl.py detail <pbancSn> [--source sbiz24|sbiz24_combine]
       [-o out.json] [--download-dir DIR] [--merge-into out.jsonl]
 
 detail 분기 (fail-closed):
   - 대상 ID가 PBLN_* 이면 기업마당 공고다 — sources_crawl.py detail <bizinfo URL>로
     검증하라는 안내와 함께 exit 2.
-  - --source sbiz24_combine 이고 PBLN_* 이 아니면 combine 전용 상세 API 계약이
-    미확인이므로 "레코드의 url 필드로 수동 확인" 안내와 함께 exit 2 (조용한 오동작 금지).
-  - 상세 조회는 --source sbiz24(기본, pbanc API)만 지원한다.
+  - --source sbiz24_combine (비PBLN): 2026-07-23 스파이크로 상세 계약 확인 —
+    SPA 라우팅상 combine 행은 pbancGubun A(공단)·D(지방정부)가 /pbanc/{sn}(기존
+    상세 API 그대로), C(대출상품)가 /loanProduct/{sn}, B(PBLN)가 /extldPbanc/{id}로
+    간다. A/D는 소진공 pbancSn 네임스페이스를 공유하므로 POST /api/pbanc/{sn}으로
+    상세를 읽는다. **대출상품(C)은 sn 네임스페이스가 달라(같은 숫자가 다른 공고)
+    기존 API로 읽으면 조용히 다른 공고를 읽는다 — 계속 fail-closed(exit 2).**
+    오독 방지를 위해 --merge-into(목록 jsonl)가 필수다: 레코드의 raw.bizType으로
+    대출상품을 거르고, 상세 응답 제목이 목록 제목과 다르면 네임스페이스 불일치로
+    exit 2 한다(조용한 오동작 금지). content_hash 산식·병합은 pbanc와 동일(v2/v3).
+  - 상세 조회 기본은 --source sbiz24(pbanc API)다.
 
 계약: references/sources.md 참조. 필수 헤더 Origin-Method: GET.
 종료 시 stderr에 `TOTAL <n> COLLECTED <m>` 출력 (coverage 검증용).
@@ -175,7 +183,8 @@ def to_record(item, mode):
         "crawled_at": crawled,
         "content_hash": None,
         "raw": {k: item.get(k) for k in ("rcrtTypeCdNm", "bizType", "pbancKindCd",
-                                          "ddlnDayCnt", "bizYr") if item.get(k) is not None},
+                                          "pbancGubun", "ddlnDayCnt", "bizYr")
+                if item.get(k) is not None},
     })
     return rec
 
@@ -208,14 +217,15 @@ def parse_files(data, pbanc_sn):
     return out
 
 
-def crawl_list(mode, out, page_size=100, delay=0.5):
+def crawl_list(mode, out, page_size=100, delay=0.5, max_pages=None):
     """total(서버 고지 행수), collected(고유 저장 건수), fetched(실제 수신 행수)를 반환.
 
     서버가 같은 공고를 두 행으로 반환하는 경우가 있어(통합조회 이중 게재)
     collected < total이어도 fetched == total이면 전수 수집 성공이다.
+    max_pages는 CI smoke용 페이지 상한 — 걸리면 coverage 검증은 호출부가 생략한다.
     """
     url = LIST_URLS[mode]
-    start, total, collected, fetched = 0, None, 0, 0
+    start, total, collected, fetched, pages = 0, None, 0, 0, 0
     seen = set()
     while True:
         body = {"sortModel": [], "search": dict(EMPTY_SEARCH), "paging": True,
@@ -235,6 +245,9 @@ def crawl_list(mode, out, page_size=100, delay=0.5):
             out.write(json.dumps(rec, ensure_ascii=False) + "\n")
             collected += 1
         start += page_size
+        pages += 1
+        if max_pages and pages >= max_pages:
+            break
         if start >= total:
             break
         time.sleep(delay)
@@ -245,11 +258,13 @@ def cmd_list(args):
     modes = ["pbanc", "combine"] if args.target == "all" else [args.target]
     grand_total = grand_collected = 0
     ok = True
+    max_pages = getattr(args, "max_pages", None)
     tmp_path = args.output + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as out:
         for mode in modes:
             try:
-                total, collected, fetched = crawl_list(mode, out, args.page_size, args.delay)
+                total, collected, fetched = crawl_list(mode, out, args.page_size,
+                                                       args.delay, max_pages=max_pages)
             except ManualEscalation:
                 raise  # 차단 신호 — main에서 exit 3
             except RuntimeError as e:
@@ -271,6 +286,8 @@ def cmd_list(args):
                 ok = False
             grand_total += total
             grand_collected += collected
+            if max_pages:
+                continue  # smoke: 페이지 상한이 걸림 — coverage 검증 생략
             if fetched < total:  # 페이지 순회가 서버 총건수에 미달
                 ok = False
             elif dup > 0 and collected < total:
@@ -326,6 +343,21 @@ def content_hash_of(body_text, attachment_hashes):
     return hashlib.sha256(payload.encode()).hexdigest()
 
 
+def _norm_title(t):
+    return re.sub(r"\s+", " ", html.unescape(t or "")).strip()
+
+
+def find_record(jsonl_path, source, source_id):
+    with open(jsonl_path, encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            r = json.loads(line)
+            if r.get("source") == source and str(r.get("source_id")) == str(source_id):
+                return r
+    return None
+
+
 def cmd_detail(args):
     sn = str(args.pbanc_sn)
     if sn.startswith("PBLN_"):
@@ -334,12 +366,53 @@ def cmd_detail(args):
               f"(URL: https://www.bizinfo.go.kr/sii/siia/selectSIIA200Detail.do?pblancId={sn})",
               file=sys.stderr)
         return 2
+    list_rec = None
     if args.source == "sbiz24_combine":
-        print(f"ERROR: combine 전용 상세 API는 계약 미확인(미지원) — {sn} 은 "
-              "레코드의 canonical_url 필드로 수동 확인하라 (fail-closed)", file=sys.stderr)
-        return 2
+        # 계약(2026-07-23 실호출 검증): 비PBLN combine 행 중 공단(A)·지방정부(D)는
+        # 소진공 pbancSn 네임스페이스를 공유해 POST /api/pbanc/{sn}으로 읽힌다.
+        # 대출상품(C, /loanProduct/{sn})은 sn 네임스페이스가 달라 같은 숫자가 다른
+        # 공고를 가리킨다 — 오독 방지를 위해 목록 레코드로 검증한다 (fail-closed).
+        if not args.merge_into:
+            print(f"ERROR: --source sbiz24_combine 은 --merge-into <combine 목록 jsonl> "
+                  f"필수 — {sn} 이 대출상품(별도 네임스페이스)인지 목록 레코드 없이 "
+                  "판정할 수 없다 (fail-closed)", file=sys.stderr)
+            return 2
+        list_rec = find_record(args.merge_into, "sbiz24_combine", sn)
+        if list_rec is None:
+            print(f"ERROR: {args.merge_into} 에 sbiz24_combine/{sn} 레코드 없음 — "
+                  "combine 목록 jsonl로 다시 시도하라 (fail-closed)", file=sys.stderr)
+            return 2
+        raw = list_rec.get("raw") or {}
+        gubun = raw.get("pbancGubun")
+        # 1차 게이트는 라우팅 코드(pbancGubun) 기반이다 — bizType 문자열은 표기가
+        # 바뀌거나 누락될 수 있어 보조 검사로만 쓴다. A(공단)·D(지방정부)만 허용,
+        # C(대출상품)·B(PBLN은 위에서 분기)·미지 코드·부재는 전부 fail-closed.
+        if gubun not in ("A", "D"):
+            what = f"pbancGubun={gubun!r}" if gubun is not None else \
+                "pbancGubun 부재(구버전 목록 jsonl — list combine 재수집 필요)"
+            print(f"ERROR: {sn} 은 {what} — pbanc 상세 API 공유가 검증된 코드는 "
+                  "A(공단)·D(지방정부)뿐이다. C(대출상품)는 별도 sn 네임스페이스라 "
+                  "다른 공고를 읽는다. canonical_url로 수동 확인하라 (fail-closed)",
+                  file=sys.stderr)
+            return 2
+        if raw.get("bizType") == "대출상품":  # 보조 검사 — 코드/표기 불일치도 거부
+            print(f"ERROR: {sn} 은 bizType=대출상품(/loanProduct 네임스페이스) — "
+                  f"pbancGubun={gubun!r}와 모순, 계약 미확인. canonical_url로 수동 "
+                  "확인하라 (fail-closed)", file=sys.stderr)
+            return 2
     detail_data = post(f"/api/pbanc/{args.pbanc_sn}", {})
     detail = parse_detail(detail_data)
+    if detail["source_id"] != sn:
+        print(f"ERROR: 상세 응답 pbancSn({detail['source_id']!r})이 요청 sn({sn!r})과 "
+              "불일치 — 잘못된 레코드에 병합될 수 있어 기록하지 않는다 (fail-closed)",
+              file=sys.stderr)
+        return 2
+    if list_rec is not None and _norm_title(detail["title"]) != _norm_title(
+            list_rec.get("title")):
+        print(f"ERROR: 상세 제목({detail['title'][:40]!r})이 목록 제목"
+              f"({str(list_rec.get('title'))[:40]!r})과 불일치 — pbancSn 네임스페이스 "
+              "불일치 의심, 기록하지 않는다 (fail-closed)", file=sys.stderr)
+        return 2
     time.sleep(args.delay)
     files_data = post("/api/cmmn/file", {"search": {"groupId": f"pbancdoc-{args.pbanc_sn}",
                                                     "tmprStrgYn": "N", "delYn": False}})
@@ -414,8 +487,9 @@ def cmd_detail(args):
         print(text)
     rc = 0
     if args.merge_into:
-        merged = merge_detail(args.merge_into, detail["source_id"], detail["content_hash"],
-                              detail["attachments"], complete)
+        # 병합 키는 요청 sn 기준 — 응답 ID는 위에서 요청 sn과 일치 검증됨
+        merged = merge_detail(args.merge_into, sn, detail["content_hash"],
+                              detail["attachments"], complete, source=args.source)
         if not merged:
             print(f"WARNING: source_id={detail['source_id']} 레코드를 "
                   f"{args.merge_into}에서 못 찾음", file=sys.stderr)
@@ -476,11 +550,14 @@ def main():
     lp.add_argument("target", choices=["pbanc", "combine", "all"], nargs="?", default="all")
     lp.add_argument("-o", "--output", required=True)
     lp.add_argument("--page-size", type=positive_int, default=100)
+    lp.add_argument("--max-pages", type=positive_int, default=None,
+                    help="페이지 상한 (CI smoke용 — coverage 검증 생략)")
     lp.add_argument("--delay", type=min_delay, default=0.5)
     dp = sub.add_parser("detail")
     dp.add_argument("pbanc_sn")
     dp.add_argument("--source", choices=["sbiz24", "sbiz24_combine"], default="sbiz24",
-                    help="레코드의 source 필드 값 — combine 레코드는 상세 API 미지원(안내 후 exit 2)")
+                    help="레코드의 source 필드 값 — sbiz24_combine은 --merge-into 필수, "
+                         "대출상품(bizType) 레코드는 fail-closed(exit 2)")
     dp.add_argument("-o", "--output")
     dp.add_argument("--download-dir")
     dp.add_argument("--merge-into", help="목록 jsonl에 content_hash·첨부 결과 병합")

@@ -101,3 +101,200 @@ def test_merge_detail_none_hash_removes_stale_version(sbiz, tmp_path):
     r = json.loads(p.read_text().splitlines()[0])
     assert r["content_hash"] is None
     assert "hash_version" not in r
+
+
+# ---------------- combine 상세 (#7 스파이크 반영, fail-closed 게이트) ----------------
+
+def _detail_response(sn, title, body="<p>본문 내용</p>"):
+    return {"result": True, "data": {"default": {
+        "pbancSn": sn, "pbancNm": title, "pbancDtlCn": body,
+        "rcptPd": {"from": "2026-07-01", "to": "2026-07-31"}, "pbancSttsCd": "P"}}}
+
+
+def _files_response(files=()):
+    return {"result": True, "data": {"default": {"list": list(files)}}}
+
+
+def _combine_rec(sn, title, biz_type="지방정부사업", gubun="D"):
+    """실제 API 필드명 기준 — 상세 라우팅 코드는 pbancGubun(A/B/C/D)이다."""
+    raw = {"pbancKindCd": "P"}
+    if biz_type is not None:
+        raw["bizType"] = biz_type
+    if gubun is not None:
+        raw["pbancGubun"] = gubun
+    return {"source": "sbiz24_combine", "source_id": str(sn), "title": title,
+            "canonical_url": f"https://www.sbiz24.kr/#/pbanc/{sn}",
+            "raw": raw,
+            "content_hash": None, "attachments": [], "attachments_complete": False}
+
+
+def _detail_args(tmp_path, sn, source="sbiz24_combine", merge=True):
+    return argparse.Namespace(
+        pbanc_sn=str(sn), source=source, output=str(tmp_path / "detail.json"),
+        download_dir=None, delay=0.5,
+        merge_into=str(tmp_path / "combine.jsonl") if merge else None)
+
+
+def test_combine_detail_requires_merge_into(sbiz, tmp_path, no_network, capsys):
+    """fail-closed: 목록 레코드 없이는 대출상품 네임스페이스 충돌을 판정할 수 없다."""
+    rc = sbiz.cmd_detail(_detail_args(tmp_path, 799, merge=False))
+    assert rc == 2
+    assert "--merge-into" in capsys.readouterr().err
+
+
+def test_combine_detail_refuses_loan_product(sbiz, tmp_path, no_network, capsys):
+    """대출상품(pbancGubun C)은 /loanProduct 별도 네임스페이스 — pbanc API로 읽으면
+    같은 숫자의 다른 공고를 읽는다. 네트워크 요청 없이 거부해야 한다."""
+    _write_jsonl(tmp_path / "combine.jsonl",
+                 [_combine_rec(413, "미소금융 재기자금", biz_type="대출상품", gubun="C")])
+    rc = sbiz.cmd_detail(_detail_args(tmp_path, 413))
+    assert rc == 2
+    assert "pbancGubun='C'" in capsys.readouterr().err
+
+
+def test_combine_detail_refuses_gubun_c_even_without_biztype(sbiz, tmp_path,
+                                                             no_network, capsys):
+    """게이트는 라우팅 코드(pbancGubun) 기반이어야 한다 — bizType이 누락·개명된
+    C 레코드가 문자열 검사만 통과해 병합되면 안 된다 (Codex NO-GO 1 회귀)."""
+    _write_jsonl(tmp_path / "combine.jsonl",
+                 [_combine_rec(413, "미소금융 재기자금", biz_type=None, gubun="C")])
+    rc = sbiz.cmd_detail(_detail_args(tmp_path, 413))
+    assert rc == 2
+    assert "pbancGubun='C'" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("gubun", ["B", "E", "Z", None])
+def test_combine_detail_refuses_unknown_or_missing_gubun(sbiz, tmp_path, no_network,
+                                                         gubun, capsys):
+    """A/D 이외의 미지 코드·pbancGubun 부재(구버전 목록)는 전부 fail-closed."""
+    _write_jsonl(tmp_path / "combine.jsonl",
+                 [_combine_rec(799, "어떤 공고", gubun=gubun)])
+    assert sbiz.cmd_detail(_detail_args(tmp_path, 799)) == 2
+    assert "fail-closed" in capsys.readouterr().err
+
+
+def test_combine_detail_biztype_loan_contradiction_refused(sbiz, tmp_path,
+                                                           no_network, capsys):
+    """pbancGubun이 A/D라도 bizType=대출상품이면 모순 — 보조 검사로 거부."""
+    _write_jsonl(tmp_path / "combine.jsonl",
+                 [_combine_rec(413, "미소금융", biz_type="대출상품", gubun="A")])
+    assert sbiz.cmd_detail(_detail_args(tmp_path, 413)) == 2
+    assert "모순" in capsys.readouterr().err
+
+
+def test_combine_detail_missing_record_fail_closed(sbiz, tmp_path, no_network):
+    _write_jsonl(tmp_path / "combine.jsonl", [_combine_rec(1, "다른 공고")])
+    assert sbiz.cmd_detail(_detail_args(tmp_path, 799)) == 2
+
+
+def test_combine_detail_title_mismatch_fail_closed(monkeypatch, sbiz, tmp_path,
+                                                   no_network, capsys):
+    """상세 응답 제목이 목록 제목과 다르면 네임스페이스 불일치 — 기록하지 않는다."""
+    _write_jsonl(tmp_path / "combine.jsonl", [_combine_rec(413, "목록의 제목")])
+
+    def fake_post(path, body, retries=3, delay=0.5):
+        assert path == "/api/pbanc/413"
+        return _detail_response(413, "전혀 다른 공고 제목")
+
+    monkeypatch.setattr(sbiz, "post", fake_post)
+    rc = sbiz.cmd_detail(_detail_args(tmp_path, 413))
+    assert rc == 2
+    assert "불일치" in capsys.readouterr().err
+    # 목록 레코드는 오염되지 않아야 한다
+    r = json.loads((tmp_path / "combine.jsonl").read_text().splitlines()[0])
+    assert r["content_hash"] is None
+
+
+def test_combine_detail_success_merges_as_combine_source(monkeypatch, sbiz, tmp_path,
+                                                         no_network):
+    """비PBLN·비대출 combine 레코드는 pbanc 상세 API로 읽고 combine 레코드에 병합한다.
+    제목 비교는 HTML 엔티티·공백 정규화 후 수행한다."""
+    title = "2026년 소상공인 지원(추가) 공고"
+    _write_jsonl(tmp_path / "combine.jsonl", [_combine_rec(799, title)])
+
+    def fake_post(path, body, retries=3, delay=0.5):
+        if path == "/api/pbanc/799":
+            return _detail_response(799, "2026년 소상공인 지원&#40;추가&#41;  공고")
+        assert path == "/api/cmmn/file"
+        return _files_response()
+
+    monkeypatch.setattr(sbiz, "post", fake_post)
+    rc = sbiz.cmd_detail(_detail_args(tmp_path, 799))
+    assert rc == 0
+    r = json.loads((tmp_path / "combine.jsonl").read_text().splitlines()[0])
+    assert r["source"] == "sbiz24_combine"
+    assert r["content_hash"] == sbiz.content_hash_of("본문 내용", [])
+    assert r["hash_version"] == 2
+    assert r["attachments_complete"] is True  # 첨부 없음
+    detail = json.loads((tmp_path / "detail.json").read_text())
+    assert detail["source_id"] == "799"
+
+
+def test_detail_response_sn_mismatch_fail_closed(monkeypatch, sbiz, tmp_path,
+                                                 no_network, capsys):
+    """상세 응답 pbancSn이 요청 sn과 다르면 병합·기록 없이 exit 2 —
+    요청 413/응답 414가 414 레코드에 병합되던 회귀 방지 (Codex NO-GO 2)."""
+    _write_jsonl(tmp_path / "combine.jsonl",
+                 [_combine_rec(413, "정상 공고", gubun="D"),
+                  _combine_rec(414, "이웃 공고", gubun="D")])
+
+    def fake_post(path, body, retries=3, delay=0.5):
+        assert path == "/api/pbanc/413"
+        return _detail_response(414, "정상 공고")  # 응답이 이웃 sn을 돌려줌
+
+    monkeypatch.setattr(sbiz, "post", fake_post)
+    rc = sbiz.cmd_detail(_detail_args(tmp_path, 413))
+    assert rc == 2
+    assert "불일치" in capsys.readouterr().err
+    recs = [json.loads(l) for l in
+            (tmp_path / "combine.jsonl").read_text().splitlines()]
+    assert all(r["content_hash"] is None for r in recs)  # 어느 레코드도 오염 금지
+    assert not (tmp_path / "detail.json").exists()  # 상세 파일도 기록하지 않는다
+
+
+def test_pbanc_detail_response_sn_mismatch_fail_closed(monkeypatch, sbiz, tmp_path,
+                                                       no_network):
+    """기본 sbiz24(pbanc) 경로에도 응답 ID 일치 검증이 적용된다."""
+    def fake_post(path, body, retries=3, delay=0.5):
+        return _detail_response(680, "다른 공고")
+
+    monkeypatch.setattr(sbiz, "post", fake_post)
+    args = argparse.Namespace(pbanc_sn="679", source="sbiz24",
+                              output=str(tmp_path / "d.json"), download_dir=None,
+                              delay=0.5, merge_into=None)
+    assert sbiz.cmd_detail(args) == 2
+    assert not (tmp_path / "d.json").exists()
+
+
+def test_pbln_detail_still_redirects_to_bizinfo(sbiz, tmp_path, no_network, capsys):
+    rc = sbiz.cmd_detail(_detail_args(tmp_path, "PBLN_000000000124620"))
+    assert rc == 2
+    assert "bizinfo" in capsys.readouterr().err
+
+
+def test_combine_to_record_keeps_pbanc_gubun(sbiz):
+    rec = sbiz.to_record({"pbancSn": 799, "pbancNm": "t", "departNm": "제주",
+                          "aplyPd": "2026-07-13 ~ 2026-07-24",
+                          "bizType": "지방정부사업", "pbancGubun": "D",
+                          "aplyPsbltySe": "신청가능"}, "combine")
+    assert rec["raw"]["pbancGubun"] == "D"
+    assert rec["raw"]["bizType"] == "지방정부사업"
+
+
+# ---------------- --max-pages smoke 계약 (#10) ----------------
+
+def test_list_max_pages_caps_requests_and_skips_coverage(monkeypatch, sbiz, pages,
+                                                         tmp_path, no_network, capsys):
+    calls = []
+
+    def fake_post(path, body, retries=3, delay=0.5):
+        calls.append(body["startRow"])
+        return pages.get(body["startRow"],
+                         {"result": True, "data": {"default": {"total": 3, "list": []}}})
+
+    monkeypatch.setattr(sbiz, "post", fake_post)
+    args = argparse.Namespace(target="pbanc", output=str(tmp_path / "out.jsonl"),
+                              page_size=2, delay=0.5, max_pages=1)
+    rc = sbiz.cmd_list(args)
+    assert rc == 0  # smoke: 첫 페이지만 — coverage 미달을 실패로 치지 않는다
+    assert calls == [0]  # 두 번째 페이지 요청 없음

@@ -1,0 +1,72 @@
+# sole-search first-page smoke canary (#10)
+#
+# 소스 사이트의 API/HTML 계약이 조용히 깨지는 걸 조기 감지한다.
+# 각 크롤러를 --max-pages 1 (첫 페이지만)로 실행하는 저부하 스모크 —
+# 전수 크롤 금지, 요청 간 딜레이는 스크립트 기본(0.5s+)을 그대로 쓴다.
+# 실패 시 job 실패가 곧 알림이다 (추가 알림 채널 없음).
+name: smoke
+
+on:
+  schedule:
+    - cron: "0 3 * * 1,4" # 월·목 03:00 UTC (KST 12:00) 주 2회
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  pytest:
+    # fixture 기반 단위 테스트 — 네트워크 없음, push에도 돈다
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python -m pip install pytest
+      - run: python -m pytest tests/ -q
+
+  smoke:
+    # 라이브 첫 페이지 확인 — 스케줄/수동 실행만 (push마다 외부 사이트를 치지 않는다)
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      SCRIPTS: skills/sole-search/scripts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: bizinfo list first page
+        run: python3 $SCRIPTS/sources_crawl.py list -o /tmp/bizinfo.jsonl --max-pages 1
+
+      - name: sbiz24 pbanc list first page
+        if: ${{ !cancelled() }}
+        run: python3 $SCRIPTS/sbiz_crawl.py list pbanc -o /tmp/sbiz_pbanc.jsonl --max-pages 1
+
+      - name: sbiz24 combine list first page
+        if: ${{ !cancelled() }}
+        run: python3 $SCRIPTS/sbiz_crawl.py list combine -o /tmp/sbiz_combine.jsonl --max-pages 1
+
+      - name: fanfandaero list first page
+        if: ${{ !cancelled() }}
+        run: python3 $SCRIPTS/region_crawl.py list fanfan -o /tmp/fanfan.jsonl --max-pages 1
+
+      - name: seoulshinbo list first page
+        if: ${{ !cancelled() }}
+        run: python3 $SCRIPTS/region_crawl.py list seoulshinbo -o /tmp/ssb.jsonl --max-pages 1
+
+      - name: gov24 list first page (optional source — exit 4 = key not configured, skip)
+        if: ${{ !cancelled() }}
+        env:
+          DATA_GO_KR_API_KEY: ${{ secrets.DATA_GO_KR_API_KEY }}
+        run: |
+          set +e
+          python3 $SCRIPTS/gov24_crawl.py list -o /tmp/gov24.jsonl --max-pages 1
+          rc=$?
+          if [ "$rc" = "4" ]; then
+            echo "gov24: API key not configured — optional source, skipping"
+            exit 0
+          fi
+          exit "$rc"
