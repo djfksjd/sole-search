@@ -174,6 +174,10 @@ candidate와 needs_detail 레코드는 상세 원문을 확인한다:
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/sbiz_crawl.py" detail <pbancSn> \
     --download-dir details -o details/<pbancSn>.json --merge-into sbiz24.jsonl
 # 기업마당 상세 (본문 해시 v2·첨부 링크를 목록에 병합 — 레코드에 hash_version: 2)
+#   --download-dir details 를 붙이면 첨부까지 다운로드·추출하고, 전부 성공 시
+#   해시 v3(본문+정렬된 첨부 sha256, hash_version: 3)를 스탬프한다 — v2↔v3 전환은
+#   diff가 1회 CHANGED로 흡수. 첨부 일부가 실패·생략되면 본문만의 v2 해시를 유지하고
+#   attachments_complete: false + exit 2로 첨부 미검증을 표현한다
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/sole-search/scripts/sources_crawl.py" detail "<URL>" \
     -o details --merge-into bizinfo.jsonl
 # 판판대로·서울신보 상세 (canonical_url로 소스 자동 판별, 소스별 jsonl에 병합)

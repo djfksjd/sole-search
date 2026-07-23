@@ -16,9 +16,13 @@ seoulsbdc·ggbaro·gmr·보조금24(gov.kr)는 robots 전면/게시판 불허로
 정상으로 본다(마감·연도 필터가 없는 누적 게시판이라 bizinfo와 달리 총건수 계약이 약함).
 공고 접수기간이 목록에 없는 레코드는 status "불명"으로 남긴다 — 상세 확인 대상.
 
-content_hash는 **hash v2**(v1과 비교 불가 — diff는 hash_version 불일치를 NEEDS_REHASH로
-처리): 순수 숫자 줄 제거를 본문 시작 3줄 이내(조회수 위치)로 한정해 본문 숫자를 보존한다.
+content_hash는 **hash v2**(v1과 비교 불가 — diff는 hash_version 불일치를 1회 CHANGED로
+전환): 순수 숫자 줄 제거를 본문 시작 3줄 이내(조회수 위치)로 한정해 본문 숫자를 보존한다.
 detail 병합 레코드에 `hash_version: 2` 부여.
+
+모든 HTTP 요청은 자동 리다이렉트를 끄고 각 Location을 요청 전에 소스별 허용 호스트
+(fanfandaero.kr / seoulshinbo.co.kr)로 검증해 최대 5홉만 수동 추적한다 — 위반 시
+요청을 보내지 않고 차단한다(내장 중간 인증서 SSL 컨텍스트는 그대로 유지).
 
 사용법:
   python3 region_crawl.py list fanfan -o fanfandaero.jsonl [--since YYYY-MM-DD]
@@ -95,13 +99,74 @@ class ManualEscalation(RuntimeError):
     """401/403/CAPTCHA — 우회하지 않고 manual로 전환하라는 신호."""
 
 
+class RedirectBlocked(RuntimeError):
+    """리다이렉트 대상이 https+허용 호스트 검사를 통과하지 못함 — 요청 전에 차단."""
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """자동 리다이렉트 금지 — open_validated가 각 Location을 요청 전에 검증한다."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+# 전역 opener: 내장 중간 인증서 SSL 컨텍스트 유지 + 리다이렉트 비활성(3xx는 HTTPError)
+urllib.request.install_opener(urllib.request.build_opener(
+    urllib.request.HTTPSHandler(context=_SSL_CTX), _NoRedirect))
+
+MAX_REDIRECTS = 5
+_REDIRECT_CODES = (301, 302, 303, 307, 308)
+
+# 소스별 허용 호스트 — 리다이렉트는 같은 소스 도메인 안에서만 추적한다
+SOURCE_DOMAINS = ("fanfandaero.kr", "seoulshinbo.co.kr")
+
+
+def _allowed_hosts_for(url):
+    host = _url_host(url)
+    for d in SOURCE_DOMAINS:
+        if _host_is(host, d):
+            return (d,)
+    return ()
+
+
+def _host_ok(url, allowed_hosts):
+    host = _url_host(url)  # https가 아니면 "" — 검사 실패
+    return bool(host) and any(_host_is(host, d) for d in allowed_hosts)
+
+
+def open_validated(url, allowed_hosts, timeout, data=None):
+    """자동 리다이렉트 없이 열고, 각 Location을 **요청을 보내기 전에** 절대 URL로
+    해석해 https+허용 호스트 검사를 통과할 때만 최대 5홉 수동 추적한다.
+    위반 시 RedirectBlocked — 외부 호스트로는 요청 자체가 나가지 않는다."""
+    if not _host_ok(url, allowed_hosts):
+        raise RedirectBlocked(f"URL host/scheme 불허: {url[:80]}")
+    for _ in range(MAX_REDIRECTS + 1):
+        req = urllib.request.Request(url, data=data, headers={"User-Agent": UA})
+        try:
+            return urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            if e.code not in _REDIRECT_CODES:
+                raise
+            loc = e.headers.get("Location") if e.headers else None
+            e.close()
+            if not loc:
+                raise RedirectBlocked(f"리다이렉트 Location 없음: {url[:80]}")
+            nxt = urllib.parse.urljoin(url, loc)
+            if not _host_ok(nxt, allowed_hosts):
+                raise RedirectBlocked(f"리다이렉트 대상 불허 — 요청 차단: {nxt[:80]}")
+            url, data = nxt, None  # 리다이렉트 추적은 GET
+    raise RedirectBlocked(f"리다이렉트 {MAX_REDIRECTS}홉 초과: {url[:80]}")
+
+
 def fetch(url, data=None, retries=3):
+    allowed = _allowed_hosts_for(url)
+    if not allowed:
+        raise RedirectBlocked(f"URL host/scheme 불허: {url[:80]}")
     body_bytes = urllib.parse.urlencode(data).encode() if data else None
-    req = urllib.request.Request(url, data=body_bytes, headers={"User-Agent": UA})
     last = None
     for i in range(retries):
         try:
-            with urllib.request.urlopen(req, timeout=30, context=_SSL_CTX) as resp:
+            with open_validated(url, allowed, timeout=30, data=body_bytes) as resp:
                 body = resp.read().decode("utf-8", "replace")
             low = body[:4000].lower()
             if any(m in low for m in BLOCK_MARKERS):
@@ -415,14 +480,31 @@ def merge_detail(jsonl_path, source, source_id, content_hash, attachments, compl
     return found
 
 
+def _url_host(url):
+    """https URL의 hostname만 소문자로 — 부분 문자열 매칭은 쿼리스트링에
+    도메인을 넣은 위장 URL(evil.example/?next=fanfandaero.kr)에 뚫린다."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return ""
+    if parts.scheme != "https":
+        return ""
+    return (parts.hostname or "").lower()
+
+
+def _host_is(host, domain):
+    return host == domain or host.endswith("." + domain)
+
+
 def detail_target(url):
     """url → (source, source_id, 본문 시작 마커 regex, 첨부 추출 함수)"""
-    if "fanfandaero.kr" in url:
+    host = _url_host(url)
+    if _host_is(host, "fanfandaero.kr"):
         m = re.search(r"nttId=(\d+)", url) or re.search(r"sprtBizCd=(\d+)", url)
         kind = "ntc" if "nttId=" in url else "biz"
         return ("fanfandaero", f"{kind}-{m.group(1)}" if m else None,
                 r'<div[^>]+class="[^"]*contents[^"]*"', fanfan_attachments)
-    if "seoulshinbo.co.kr" in url:
+    if _host_is(host, "seoulshinbo.co.kr"):
         m = re.search(r"/bbs/view/(\d+)\.do", url)
         return ("seoulshinbo", f"ntc-{m.group(1)}" if m else None,
                 r'<div[^>]+class="[^"]*sub_cont_wrap[^"]*"', ssb_attachments)
@@ -435,7 +517,7 @@ END_MARKERS = (r'<div[^>]+id="footer"', r'<footer\b', r'<div[^>]+class="[^"]*foo
                r'다음글|이전글')
 
 
-HASH_VERSION = 2  # hash v2 — 순수 숫자 줄을 본문에서 보존(v1과 비교 불가, diff는 NEEDS_REHASH)
+HASH_VERSION = 2  # hash v2 — 순수 숫자 줄을 본문에서 보존(v1과 비교 불가, diff는 1회 CHANGED로 전환)
 
 
 def extract_body(h, start_pattern):
