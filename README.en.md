@@ -62,9 +62,13 @@ Korea-only. Reports are written in Korean for shop owners, with bureaucratic ter
   **within these declared sources**.
 - Optional: Bojogeum24 (gov.kr always-on benefit programs, ~11k services) via the free
   data.go.kr open API. Apply for "대한민국 공공서비스(혜택) 정보" (dataset 15113968,
-  auto-approved), then store the key in `~/.config/sole-search/api_key` or the
-  `DATA_GO_KR_API_KEY` env var. Without a key the source is reported as inactive —
-  everything else works normally. See the Korean README for a step-by-step guide.
+  auto-approved), then provide the key by any of: a repo/skill `.env` line
+  `DATA_GO_KR_KEY=...`, the `DATA_GO_KR_KEY` env var, the shared
+  `~/.config/data_go_kr_key`, or the legacy `~/.config/sole-search/api_key` /
+  `DATA_GO_KR_API_KEY`. This is the **same data.go.kr key** ir-search uses for K-Startup,
+  and it is **never printed to logs, errors, or the command line** (`.env` is gitignored).
+  Without a key the source is reported as inactive — everything else works normally.
+  See the Korean README for a step-by-step guide.
 - Manual-guidance only: per-round policy-loan intake status (ols), regional credit guarantee
   foundations, non-federated local portals — see `skills/sole-search/references/region-registry.md`.
 - Binary HWP attachments cannot be auto-extracted (HWPX/PDF can); affected candidates are

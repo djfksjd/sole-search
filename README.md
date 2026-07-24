@@ -243,7 +243,7 @@ needs: [grant, facility, online_sales]
               region_crawl.py  판판대로 + 서울신보(서울 프로필)
               gov24_crawl.py   보조금24 상시 혜택 (API 키 등록 시)
 1.5 선별      LLM이 전 건 검토 → screening.jsonl (감사 가능)
-2. 판정       상세 원문 + 첨부(attach_extract.py) 검증 → 5단계 판정 + 근거 인용
+2. 판정       상세 원문 + 첨부(attach_download.py 다운로드 → attach_extract.py 추출) 검증 → 5단계 판정 + 근거 인용
 3. 보고서     ① 오늘 신청할 것 ② coverage_manifest ③ 💰받는 돈/🏦빌리는 돈/🎓배우고 돕기 ④ 사업전환 후보
 재조사        diff_surveys.py  필드·해시 비교, 프로필 변경 시 전체 재판정
 ```
