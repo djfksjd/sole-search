@@ -181,14 +181,17 @@ needs: [grant, facility, online_sales]
 5. **키 등록** — 둘 중 하나:
 
    ```bash
-   # 방법 A: 설정 파일 (권장 — 한 번만 하면 됨)
-   mkdir -p ~/.config/sole-search
-   echo "발급받은_인증키" > ~/.config/sole-search/api_key
-   chmod 600 ~/.config/sole-search/api_key
+   # 방법 A: 리포 루트 .env (권장 — ir-search와 같은 키를 공유)
+   #   .env 파일에  DATA_GO_KR_KEY=발급받은_인증키  한 줄. (.gitignore로 커밋 차단)
 
-   # 방법 B: 환경변수
-   export DATA_GO_KR_API_KEY="발급받은_인증키"
+   # 방법 B: 공용 설정 파일 (ir-search·sole-search 공통)
+   echo "발급받은_인증키" > ~/.config/data_go_kr_key && chmod 600 ~/.config/data_go_kr_key
+
+   # 방법 C: 환경변수 (DATA_GO_KR_KEY 권장, DATA_GO_KR_API_KEY 도 인식)
+   export DATA_GO_KR_KEY="발급받은_인증키"
    ```
+
+   > 같은 data.go.kr 서비스키가 sole-search(gov24)와 ir-search(K-Startup) 양쪽에 재사용됩니다. 키는 스크립트가 직접 읽으며 **로그·에러·명령행에 절대 출력되지 않습니다**. `~/.config/sole-search/api_key` 도 여전히 인식됩니다.
 
 6. 끝. 다음 조사부터 보조금24가 자동 포함된다. 확인하려면:
 

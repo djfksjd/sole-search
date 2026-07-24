@@ -141,17 +141,51 @@ def pick(rec, keys):
     return None
 
 
+def _read_env_kv(path, name):
+    """Read NAME=value from a .env file. Never prints; returns '' if absent."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            for raw in f:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                k, _, v = line.partition("=")
+                if k.strip() == name:
+                    return v.strip().strip('"').strip("'")
+    except OSError:
+        return ""
+    return ""
+
+
 def resolve_key(arg_key):
     if arg_key:
         return arg_key.strip()
-    env = os.environ.get("DATA_GO_KR_API_KEY", "").strip()
+    # DATA_GO_KR_KEY is the unified name (one data.go.kr key serves gov24 /
+    # K-Startup); DATA_GO_KR_API_KEY is kept for backward compatibility.
+    env = (
+        os.environ.get("DATA_GO_KR_KEY", "").strip()
+        or os.environ.get("DATA_GO_KR_API_KEY", "").strip()
+    )
     if env:
         return env
-    try:
-        with open(KEY_FILE, encoding="utf-8") as f:
-            return f.readline().strip()
-    except OSError:
-        return ""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for env_path in (
+        os.path.join(os.path.dirname(here), ".env"),  # skill root (has SKILL.md)
+        os.path.join(os.path.dirname(os.path.dirname(here)), ".env"),
+        os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(here))), ".env"),  # repo
+    ):
+        v = _read_env_kv(env_path, "DATA_GO_KR_KEY")
+        if v:
+            return v
+    for path in (KEY_FILE, os.path.expanduser("~/.config/data_go_kr_key")):
+        try:
+            with open(path, encoding="utf-8") as f:
+                v = f.readline().strip()
+            if v:
+                return v
+        except OSError:
+            continue
+    return ""
 
 
 def encode_key(key):
