@@ -24,10 +24,204 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from html.parser import HTMLParser
 
 MAX_ATTACH_BYTES = 50 * 1024 * 1024  # 첨부 다운로드 상한 50MB
 MAX_REDIRECTS = 5
 _REDIRECT_CODES = (301, 302, 303, 307, 308)
+
+def _skip_string(code, i):
+    """i가 여는 따옴표를 가리킬 때 닫는 따옴표 다음 인덱스를 반환(이스케이프 처리)."""
+    q, n = code[i], len(code)
+    i += 1
+    while i < n:
+        if code[i] == "\\":
+            i += 2; continue
+        if code[i] == q:
+            return i + 1
+        i += 1
+    return n  # 미종료 문자열
+
+
+_REGEX_PREFIX = set("(,=:[!&|?{};+-*%<>~^")  # 이 뒤의 '/'는 나눗셈이 아니라 정규식 시작
+
+
+def _skip_regex(code, i):
+    """i가 정규식 리터럴 여는 '/'를 가리킬 때 닫는 '/' 다음 인덱스를 반환한다.
+    문자 클래스 [ ... ] 안의 '/'와 이스케이프를 처리한다."""
+    n, in_class = len(code), False
+    i += 1
+    while i < n:
+        c = code[i]
+        if c == "\\":
+            i += 2; continue
+        if c == "[":
+            in_class = True
+        elif c == "]":
+            in_class = False
+        elif c == "/" and not in_class:
+            return i + 1
+        elif c == "\n":
+            return i  # 미종료 정규식
+        i += 1
+    return n
+
+
+def _read_rhs(code, i):
+    """대입 `=` 다음부터 top-level `;`/개행까지의 RHS를 어휘 상태 인식으로 읽는다.
+    문자열 값은 보존하고 **주석·정규식 리터럴은 제외**한다(주석·정규식 안의 위조
+    'pblancId=' 텍스트를 값으로 오인하지 않도록, Codex sole #2). (rhs_text, next_index)."""
+    n, out, prev = len(code), [], ""
+    while i < n:
+        c = code[i]
+        if c in "'\"`":
+            j = _skip_string(code, i); out.append(code[i:j]); prev = "'"; i = j; continue
+        if c == "/" and i + 1 < n and code[i + 1] == "/":
+            j = code.find("\n", i); i = n if j < 0 else j; continue
+        if c == "/" and i + 1 < n and code[i + 1] == "*":
+            j = code.find("*/", i + 2); i = n if j < 0 else j + 2; continue
+        if c == "/" and (prev == "" or prev in _REGEX_PREFIX):
+            i = _skip_regex(code, i); prev = "/"; continue  # 정규식 리터럴 제외
+        if c == ";":
+            break  # 개행은 종료로 보지 않는다 — 문장은 여러 줄에 걸칠 수 있다
+                   # (// 주석 다음 줄의 실제 값을 놓치지 않도록). ; 없으면 끝까지 읽고
+                   # 여러 값이 섞이면 집합≠{요청}으로 fail-closed.
+        out.append(c)
+        if not c.isspace():
+            prev = c
+        i += 1
+    return "".join(out), i
+
+
+def _assignments(code, names):
+    """code에서 `var/let/const IDENT = …` **변수 선언** 대입만 찾아 (ident, rhs)를
+    내놓는다(Codex sole #2). 권위 있는 자기 ID는 변수 선언이다 — property 대입
+    (related.altUrl)·`var` 없는 재대입은 인정하지 않는다. (실 기업마당 altUrl은 스크립트
+    함수 내부에 있어 brace depth 0을 요구하지 않는다.) 문자열·주석·정규식 리터럴 안,
+    `==`(비교)·`=>`(화살표)도 배제한다. RHS 문법 검증은 호출부(엄격 정규식)가 한다."""
+    i, n, prev, expect = 0, len(code), "", False
+    while i < n:
+        c = code[i]
+        if c in "'\"`":
+            i = _skip_string(code, i); prev = "'"; expect = False; continue
+        if c == "/" and i + 1 < n and code[i + 1] == "/":
+            j = code.find("\n", i); i = n if j < 0 else j; continue
+        if c == "/" and i + 1 < n and code[i + 1] == "*":
+            j = code.find("*/", i + 2); i = n if j < 0 else j + 2; continue
+        if c == "/" and (prev == "" or prev in _REGEX_PREFIX):
+            i = _skip_regex(code, i); prev = "/"; expect = False; continue
+        if c == ".":
+            prev = "."; expect = False; i += 1; continue
+        if c.isalpha() or c in "_$":
+            j = i
+            while j < n and (code[j].isalnum() or code[j] in "_$"):
+                j += 1
+            ident = code[i:j]
+            is_prop = (prev == ".")
+            if ident in ("var", "let", "const"):
+                expect = True; prev = "kw"; i = j; continue  # 선언 키워드
+            k = j
+            while k < n and code[k] in " \t":
+                k += 1
+            if ident in names and expect and not is_prop \
+                    and k < n and code[k] == "=" and (k + 1 >= n or code[k + 1] not in "=>"):
+                rhs, i = _read_rhs(code, k + 1)
+                yield ident, rhs
+                expect = False; prev = "id"; continue
+            expect = False; prev = ident[-1]; i = j; continue
+        if c.isspace():
+            i += 1; continue  # 공백은 expect/prev 유지 (var  altUrl)
+        prev = c; expect = False; i += 1
+
+
+# 실측된 **정확한** altUrl 대입 RHS 문법(2026-07 기업마당):
+#   var altUrl = location.origin + location.pathname + '?pblancId=PBLN_...';
+# 이 형태가 아닌 RHS(IIFE·삼항·콤마연산자·템플릿·함수 등)는 **해석하지 않고 거부**한다
+# (Codex sole #2 최종: 부분 JS 해석 대신 알려진 좁은 문법만 수용, fail-closed).
+_BIZ_RHS_RE = re.compile(
+    r"location\.origin\s*\+\s*location\.pathname\s*\+\s*"
+    r"(['\"])\?pblancId=(PBLN_\d+)\1\Z")
+# 실측된 정확한 nttId RHS: 따옴표 있거나 없는 정수 리터럴 하나.
+_INT_RHS_RE = re.compile(r"(['\"]?)(\d+)\1\Z")
+
+
+def alturl_pblanc_ids(script):
+    """code-state `altUrl = <RHS>` 대입만 인정하되, RHS가 **실측된 정확한 문법**일
+    때만 그 pblancId를 인정한다. 알 수 없는 RHS 문법이 하나라도 있으면 None을 내
+    호출부가 fail-closed로 거부하게 한다(임의 JS 해석 금지). 반환: set 또는 None."""
+    ids = set()
+    for _name, rhs in _assignments(script, {"altUrl"}):
+        m = _BIZ_RHS_RE.match(rhs.strip())
+        if not m:
+            return None  # 알 수 없는 altUrl 문법 — fail-closed
+        ids.add(m.group(2))
+    return ids
+
+
+def js_var_int_ids(script, varname):
+    """code-state `varname = <RHS>` 대입만 인정하되, RHS가 정수 리터럴 하나일 때만
+    그 값을 인정한다. 그 외 RHS는 None(=거부). 반환: set[int] 또는 None."""
+    ids = set()
+    for _name, rhs in _assignments(script, {varname}):
+        m = _INT_RHS_RE.match(rhs.strip())
+        if not m:
+            return None
+        ids.add(int(m.group(2)))
+    return ids
+
+
+class _MarkerParser(HTMLParser):
+    """실제 element/스크립트만 뽑는다(Codex sole #2: raw 정규식은 script 텍스트 속
+    가짜 `<link>` 문자열·주석에 속는다). <script>의 텍스트 데이터, <link rel=canonical>
+    href의 view/<id>, <input name=nttId> value를 element 단위로 수집한다."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.script_text = []      # 스크립트별 텍스트(요소당 하나로 합산)
+        self.canonical_views = set()
+        self.input_nttids = set()
+        self._in_script = False
+        self._cur = []             # 현재 <script>의 누적 청크
+
+    def handle_starttag(self, tag, attrs):
+        d = {k.lower(): (v or "") for k, v in attrs}
+        if tag == "script":
+            self._in_script = True
+            self._cur = []
+        elif tag == "link" and d.get("rel", "").lower() == "canonical":
+            m = re.search(r"/view/0*(\d+)\.do", d.get("href", ""))
+            if m:
+                self.canonical_views.add(int(m.group(1)))
+        elif tag == "input" and d.get("name") == "nttId":
+            v = d.get("value", "").strip()
+            if v.isdigit():
+                self.input_nttids.add(int(v))
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag):
+        if tag == "script" and self._in_script:
+            self.script_text.append("".join(self._cur))  # 이 스크립트 하나로 합산
+            self._in_script = False
+            self._cur = []
+
+    def handle_data(self, data):
+        if self._in_script:
+            self._cur.append(data)
+
+
+def page_self_markers(html):
+    """페이지의 권위 있는 자기 식별 마커를 element 파싱으로 수집한다.
+    반환: (script_texts: list[str] — **스크립트별 독립** 텍스트(이어붙이지 않음,
+    Codex sole #2: `<script>alt</script><script>Url=…</script>` 위조 방지),
+    canonical_views: set[int], input_nttids: set[int])."""
+    p = _MarkerParser()
+    try:
+        p.feed(html or "")
+    except Exception:  # noqa: BLE001 — 파서가 깨져도 fail-closed(빈 마커)
+        return [], set(), set()
+    return list(p.script_text), p.canonical_views, p.input_nttids
 
 
 class ManualEscalation(RuntimeError):
@@ -57,12 +251,19 @@ def host_allowed(url, allowed_hosts):
     return any(host == a or host.endswith("." + a) for a in allowed_hosts)
 
 
-def open_validated(url, allowed_hosts, timeout, ua, data=None):
+def open_validated(url, allowed_hosts, timeout, ua, data=None, robots_allowed=None):
     """자동 리다이렉트 없이 열고, 각 Location을 **요청을 보내기 전에** 절대 URL로
     해석해 https+허용 호스트 검사를 통과할 때만 최대 5홉 수동 추적한다.
-    위반 시 RedirectBlocked — 외부 호스트로는 요청 자체가 나가지 않는다."""
+    위반 시 RedirectBlocked — 외부 호스트로는 요청 자체가 나가지 않는다.
+
+    robots_allowed(url)->bool이 주어지면 **최초 URL과 모든 리다이렉트 홉**을
+    robots 불허 경로에 대해 검사한다 — 허용 경로에서 시작해도 302로 불허 경로
+    (/uploads 등)로 유도되면 요청 없이 차단한다(Codex sole #5: 홉이 host만
+    재검사하고 robots를 건너뛰던 우회)."""
     if not host_allowed(url, allowed_hosts):
         raise RedirectBlocked(f"URL host/scheme 불허: {url[:80]}")
+    if robots_allowed is not None and not robots_allowed(url):
+        raise RedirectBlocked(f"robots 불허 경로 — 요청 차단: {url[:80]}")
     for _ in range(MAX_REDIRECTS + 1):
         req = urllib.request.Request(url, data=data, headers={"User-Agent": ua})
         try:
@@ -77,6 +278,8 @@ def open_validated(url, allowed_hosts, timeout, ua, data=None):
             nxt = urllib.parse.urljoin(url, loc)
             if not host_allowed(nxt, allowed_hosts):
                 raise RedirectBlocked(f"리다이렉트 대상 불허 — 요청 차단: {nxt[:80]}")
+            if robots_allowed is not None and not robots_allowed(nxt):
+                raise RedirectBlocked(f"리다이렉트 robots 불허 — 요청 차단: {nxt[:80]}")
             url, data = nxt, None  # 리다이렉트 추적은 GET
     raise RedirectBlocked(f"리다이렉트 {MAX_REDIRECTS}홉 초과: {url[:80]}")
 
@@ -107,9 +310,15 @@ def robots_path_allowed(url, disallowed_prefixes):
     candidates = []
     cur = path
     for _ in range(_MAX_UNQUOTE + 1):
+        # 잘못된 percent 인코딩은 매 디코드 단계에서 검사(%25ZZ→%ZZ 후속 검출).
+        # malformed면 fail-closed(Codex ir #7, sole 공유).
+        if re.search(r"%(?![0-9A-Fa-f]{2})", cur):
+            return False
         candidates.append(cur)
         try:
-            nxt = urllib.parse.unquote(cur)
+            # errors="strict": 기본 "replace"는 %FF·%ZZ·절단 시퀀스를 대체문자로
+            # 삼켜 '디코딩 불가 → 거부'가 죽는다(Codex ir #7). strict로 fail-closed.
+            nxt = urllib.parse.unquote(cur, errors="strict")
         except (ValueError, UnicodeDecodeError):
             return False
         if nxt == cur:
@@ -230,18 +439,21 @@ def _safe_record_dir(download_dir, subdir):
     return pathlib.Path(real_d)
 
 
-def download_attachment(url, dirpath, fallback_name, idx, allowed_hosts, ua):
+def download_attachment(url, dirpath, fallback_name, idx, allowed_hosts, ua,
+                        robots_allowed=None):
     """보안 계약(모듈 docstring) 전체를 적용해 첨부를 저장하고 경로를 반환한다.
 
     스트리밍은 임시 파일로 받고, 최종 이름은 _finalize_no_clobber로 확정한다 —
     같은 폴더의 기존 파일(다른 공고의 동명 첨부 등)을 덮어쓰지 않는다.
+    robots_allowed는 리다이렉트 홉까지 robots 재검사에 쓴다(open_validated로 전달).
     """
     if not host_allowed(url, allowed_hosts):
         raise RuntimeError(f"첨부 URL host/scheme 불허: {url[:80]}")
     dirpath = pathlib.Path(dirpath).resolve()
     tmp = None
     try:
-        with open_validated(url, allowed_hosts, timeout=60, ua=ua) as r:
+        with open_validated(url, allowed_hosts, timeout=60, ua=ua,
+                            robots_allowed=robots_allowed) as r:
             # 사전 검증이 1차 방어 — geturl 재검사는 심층 방어로 유지한다
             final = r.geturl() if hasattr(r, "geturl") else url
             if not host_allowed(final, allowed_hosts):
@@ -327,7 +539,8 @@ def process_attachments(attachments, download_dir, delay, allowed_hosts, ua,
         time.sleep(delay)
         try:
             path = download_attachment(f["url"], d, f.get("filename"), idx,
-                                       allowed_hosts, ua)
+                                       allowed_hosts, ua,
+                                       robots_allowed=robots_allowed)
         except ManualEscalation:
             raise  # 차단 신호 — 호출부에서 exit 3
         except RedirectBlocked as e:

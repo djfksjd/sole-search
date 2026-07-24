@@ -42,6 +42,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from datetime import datetime, timezone, timedelta
 
@@ -68,12 +69,64 @@ class ManualEscalation(RuntimeError):
     """401/403 — 우회하지 않고 manual로 전환하라는 신호 (종료 코드 3)."""
 
 
+class RedirectBlocked(RuntimeError):
+    """리다이렉트 대상이 허용 호스트/스킴을 벗어남 — 요청 자체를 보내지 않음."""
+
+
+ALLOWED_HOSTS = ("www.sbiz24.kr", "sbiz24.kr")
+_MAX_REDIRECTS = 5
+
+
+def _host_ok(url):
+    """https + 정확 호스트/서브도메인 경계 — 부분문자열·스킴 위장 차단."""
+    try:
+        p = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    if p.scheme != "https":
+        return False
+    h = (p.hostname or "").lower()
+    return any(h == a or h.endswith("." + a) for a in ALLOWED_HOSTS)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _open_validated(url, timeout, data=None):
+    """자동 리다이렉트를 끄고, 각 Location을 **요청 전에** 절대 URL로 해석해
+    https+허용 호스트를 통과할 때만 최대 5홉 수동 추적한다(Codex sole #7 —
+    sbiz 기본 오프너가 외부 호스트로 키/요청을 유출하던 것 차단)."""
+    if not _host_ok(url):
+        raise RedirectBlocked(f"URL host/scheme 불허: {url[:80]}")
+    for _ in range(_MAX_REDIRECTS + 1):
+        req = urllib.request.Request(url, data=data, headers=HEADERS)
+        try:
+            return _OPENER.open(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            if e.code not in (301, 302, 303, 307, 308):
+                raise
+            loc = e.headers.get("Location") if e.headers else None
+            e.close()
+            if not loc:
+                raise RedirectBlocked(f"리다이렉트 Location 없음: {url[:80]}")
+            nxt = urllib.parse.urljoin(url, loc)
+            if not _host_ok(nxt):
+                raise RedirectBlocked(f"리다이렉트 대상 불허 — 요청 차단: {nxt[:80]}")
+            url, data = nxt, None  # 리다이렉트 추적은 GET
+    raise RedirectBlocked(f"리다이렉트 {_MAX_REDIRECTS}홉 초과: {url[:80]}")
+
+
 def post(path, body, retries=3, delay=0.5):
-    req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(), headers=HEADERS)
     last = None
     for i in range(retries):
         try:
-            with urllib.request.urlopen(req, timeout=30) as r:
+            with _open_validated(BASE + path, timeout=30,
+                                 data=json.dumps(body).encode()) as r:
                 data = json.loads(r.read().decode())
             if data.get("result") is False or "data" not in data:
                 raise RuntimeError(f"POST {path}: API result=false 또는 구조 변경 "
@@ -85,6 +138,8 @@ def post(path, body, retries=3, delay=0.5):
             last = e
             if not (e.code == 429 or e.code >= 500):
                 break  # 4xx는 재시도 무의미
+        except RedirectBlocked:
+            raise  # 외부 호스트 유출 시도 — 재시도 없이 즉시 실패
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
             last = e
         time.sleep(delay * (i + 1))
@@ -162,12 +217,20 @@ def to_record(item, mode):
         pid = str(item.get("pbancId") or item.get("pbancSn") or "")
         aply_pd = str(item.get("aplyPd") or "")
         parts = [p.strip() for p in aply_pd.split("~")] if "~" in aply_pd else [None, None]
+        gubun = str(item.get("pbancGubun") or "")
+        # 네임스페이스별 정확한 상세 URL — C(대출상품)는 별도 loanProduct 경로다.
+        # C를 /#/pbanc/로 두면 수동 확인 시 다른 공고(같은 sn의 공단 공고)가 열린다(Codex #1).
+        if pid.startswith("PBLN"):
+            curl = f"{BASE}/#/extldPbanc/{pid}"
+        elif gubun == "C":
+            curl = f"{BASE}/#/loanProduct/{pid}"
+        else:
+            curl = f"{BASE}/#/pbanc/{pid}"
         rec = {
             "source": "sbiz24_combine",
             "source_id": pid,
             "announce_no": pid if pid.startswith("PBLN") else None,
-            "canonical_url": f"{BASE}/#/extldPbanc/{pid}" if pid.startswith("PBLN")
-                             else f"{BASE}/#/pbanc/{pid}",
+            "canonical_url": curl,
             "title": item.get("pbancNm") or "",
             "agency": item.get("departNm") or item.get("rcrtTypeCdNm") or "미상",
             "region_scope": item.get("regionNmList") or "전국",
@@ -310,12 +373,34 @@ def safe_filename(file_id, filename):
     return f"{file_id[:8]}_{base[:120]}" if base else file_id
 
 
-def download_capped(url, path):
-    req = urllib.request.Request(url, headers=HEADERS)
+def write_sidecar(text_path, text):
+    """추출 텍스트를 <첨부>.txt에 기록 — 예측 가능한 이름이라 사전 배치된
+    symlink/파일을 따라가면 임의 파일을 덮어쓴다(Codex sole #3). O_CREAT|O_EXCL로
+    새로 만들 때만 쓰고, 이미 존재하면(symlink 포함) 저장을 포기한다(fail-closed,
+    증거 비파괴 — 첨부·해시는 유지). 저장 성공 시 True."""
     try:
-        with urllib.request.urlopen(req, timeout=60) as r, open(path, "wb") as fh:
+        fd = os.open(text_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+    except FileExistsError:
+        print(f"WARNING sidecar {os.path.basename(text_path)}: 기존 경로 존재"
+              "(symlink 의심) — 텍스트 저장 거부", file=sys.stderr)
+        return False
+    except OSError as e:
+        print(f"WARNING sidecar {os.path.basename(text_path)}: 저장 불가 ({e})",
+              file=sys.stderr)
+        return False
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    return True
+
+
+def download_capped(url, path):
+    try:
+        with _open_validated(url, timeout=60) as r, open(path, "wb") as fh:
             length = r.headers.get("Content-Length")
-            if length and int(length) > MAX_ATTACH_BYTES:
+            # 서버가 조작한 비-숫자 길이(예: "NaN")로 예외가 새어 exit 1이 되지 않도록
+            # 방어한다(Codex sole #9) — 숫자일 때만 사전 상한 검사, 아니면 무시하고
+            # 아래 스트리밍 상한이 최종 방어선.
+            if length and length.strip().isdigit() and int(length) > MAX_ATTACH_BYTES:
                 raise RuntimeError(f"첨부 Content-Length가 상한 초과: {length}")
             read = 0
             while True:
@@ -367,6 +452,7 @@ def cmd_detail(args):
               file=sys.stderr)
         return 2
     list_rec = None
+    gubun = None  # combine에서만 설정 — merge 시 네임스페이스 결속(A/413↔C/413 오염 방지)
     if args.source == "sbiz24_combine":
         # 계약(2026-07-23 실호출 검증): 비PBLN combine 행 중 공단(A)·지방정부(D)는
         # 소진공 pbancSn 네임스페이스를 공유해 POST /api/pbanc/{sn}으로 읽힌다.
@@ -383,7 +469,7 @@ def cmd_detail(args):
                   "combine 목록 jsonl로 다시 시도하라 (fail-closed)", file=sys.stderr)
             return 2
         raw = list_rec.get("raw") or {}
-        gubun = raw.get("pbancGubun")
+        gubun = raw.get("pbancGubun")  # merge에서 이 코드의 레코드만 갱신
         # 1차 게이트는 라우팅 코드(pbancGubun) 기반이다 — bizType 문자열은 표기가
         # 바뀌거나 누락될 수 있어 보조 검사로만 쓴다. A(공단)·D(지방정부)만 허용,
         # C(대출상품)·B(PBLN은 위에서 분기)·미지 코드·부재는 전부 fail-closed.
@@ -446,18 +532,22 @@ def cmd_detail(args):
                 continue
             r = attach_extract.extract(str(path))
             if r["ok"] and not r.get("reason"):
-                f["extract_status"] = "ok"
                 text_path = str(path) + ".txt"
-                pathlib.Path(text_path).write_text(r["text"], encoding="utf-8")
-                f["text_path"] = text_path
+                if write_sidecar(text_path, r["text"]):
+                    f["extract_status"] = "ok"
+                    f["text_path"] = text_path
+                else:
+                    # 텍스트를 저장 못 하면 '확인됨'이 아니다 — complete 위장 방지(Codex #3)
+                    f["extract_status"] = "failed"
+                    f["extract_reason"] = "sidecar_write_blocked"
             elif r["ok"]:
                 # 부분 추출(예: hwp_preview_only) — 텍스트는 저장하되 complete 아님,
                 # SKILL.md 규칙: attachments_complete=false → '확인됨' 금지
                 f["extract_status"] = "partial"
                 f["extract_reason"] = r["reason"]
                 text_path = str(path) + ".txt"
-                pathlib.Path(text_path).write_text(r["text"], encoding="utf-8")
-                f["text_path"] = text_path
+                if write_sidecar(text_path, r["text"]):
+                    f["text_path"] = text_path
                 print(f"WARNING extract {f['filename']}: 부분 추출 ({r['reason']})",
                       file=sys.stderr)
             else:
@@ -473,7 +563,11 @@ def cmd_detail(args):
     detail["attachments_complete"] = complete
     downloads_ok = all(f.get("download_status") == "ok" for f in detail["attachments"]) \
         if detail["attachments"] else True
-    if args.download_dir and not downloads_ok:
+    # v3 해시는 **추출까지 성공(complete)**했을 때만 스탬프한다. 다운로드만 되고
+    # 추출이 미지원/부분이면(complete=False) content_hash=None(NEEDS_REHASH) —
+    # 아니면 나중에 추출 성공해도 바이트가 같아 diff가 UNCHANGED로 흡수해
+    # '첨부 미확인' 판정이 영구히 남는다(Codex sole #6, downloads_ok→complete).
+    if args.download_dir and not complete:
         detail["content_hash"] = None  # 불완전 해시 대신 None — NEEDS_REHASH 계약과 일치
     elif not args.download_dir and detail["attachments"]:
         detail["content_hash"] = None  # 첨부 미다운로드 — 본문만으로는 완전한 해시가 아니다
@@ -489,7 +583,8 @@ def cmd_detail(args):
     if args.merge_into:
         # 병합 키는 요청 sn 기준 — 응답 ID는 위에서 요청 sn과 일치 검증됨
         merged = merge_detail(args.merge_into, sn, detail["content_hash"],
-                              detail["attachments"], complete, source=args.source)
+                              detail["attachments"], complete, source=args.source,
+                              expected_gubun=gubun)
         if not merged:
             print(f"WARNING: source_id={detail['source_id']} 레코드를 "
                   f"{args.merge_into}에서 못 찾음", file=sys.stderr)
@@ -505,8 +600,15 @@ def cmd_detail(args):
     return rc
 
 
-def merge_detail(jsonl_path, source_id, content_hash, attachments, complete, source="sbiz24"):
-    """목록 jsonl의 해당 레코드에 상세 검증 결과를 병합한다 (원자적 교체)."""
+def merge_detail(jsonl_path, source_id, content_hash, attachments, complete,
+                 source="sbiz24", expected_gubun=None):
+    """목록 jsonl의 해당 레코드에 상세 검증 결과를 병합한다 (원자적 교체).
+
+    combine 목록에서 A(공단)/D(지방정부)와 C(대출상품)는 sn 네임스페이스가 겹칠 수
+    있어 (source, source_id)만으로는 서로 다른 두 공고가 같은 키를 갖는다. 이때
+    A 상세를 병합하면 같은 sn의 C 레코드까지 A 해시로 덮어써 조용히 오염된다
+    (Codex sole #1). expected_gubun이 주어지면 raw.pbancGubun이 일치하는 레코드만
+    갱신해 네임스페이스를 결속한다 — 불일치·부재 코드는 건드리지 않는다."""
     tmp = jsonl_path + ".tmp"
     found = False
     with open(jsonl_path, encoding="utf-8") as src, open(tmp, "w", encoding="utf-8") as dst:
@@ -514,7 +616,12 @@ def merge_detail(jsonl_path, source_id, content_hash, attachments, complete, sou
             if not line.strip():
                 continue
             r = json.loads(line)
-            if r.get("source") == source and str(r.get("source_id")) == str(source_id):
+            match = (r.get("source") == source
+                     and str(r.get("source_id")) == str(source_id))
+            if match and expected_gubun is not None:
+                # 네임스페이스 결속: 검증된 gubun과 다른 레코드(예: 같은 sn의 C)는 제외
+                match = (r.get("raw") or {}).get("pbancGubun") == expected_gubun
+            if match:
                 r["content_hash"] = content_hash
                 if content_hash is not None:
                     r["hash_version"] = HASH_VERSION
