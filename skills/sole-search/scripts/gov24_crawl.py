@@ -75,6 +75,64 @@ class ManualEscalation(RuntimeError):
     """HTTP 401/403 — 서버가 인증을 거부. 우회하지 않고 manual 전환(종료 코드 3)."""
 
 
+class RedirectBlocked(RuntimeError):
+    """리다이렉트 대상이 허용 호스트/스킴을 벗어남 — 요청을 보내지 않음."""
+
+
+ALLOWED_HOSTS = ("api.odcloud.kr",)
+
+
+def _host_ok(url):
+    try:
+        p = urllib.parse.urlsplit(url)
+    except ValueError:
+        return False
+    if p.scheme != "https":
+        return False
+    h = (p.hostname or "").lower()
+    return any(h == a or h.endswith("." + a) for a in ALLOWED_HOSTS)
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _open_validated(url, timeout):
+    """자동 리다이렉트를 끄고 각 홉을 요청 전에 https+허용 호스트로 검증한다 —
+    serviceKey가 query에 실리므로(우회 불가) 302로 외부 호스트에 키가 새는 것을
+    막는다(Codex sole #7·#8). 위반 시 RedirectBlocked."""
+    if not _host_ok(url):
+        raise RedirectBlocked("URL host/scheme 불허")  # 키 포함 URL은 로그에 남기지 않음
+    for _ in range(6):
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        try:
+            return _OPENER.open(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            if e.code not in (301, 302, 303, 307, 308):
+                raise
+            loc = e.headers.get("Location") if e.headers else None
+            e.close()
+            if not loc or not _host_ok(urllib.parse.urljoin(url, loc)):
+                raise RedirectBlocked("리다이렉트 대상 불허 — 요청 차단")
+            url = urllib.parse.urljoin(url, loc)
+    raise RedirectBlocked("리다이렉트 홉 초과")
+
+
+def _redact(msg, key):
+    """에러 메시지에서 serviceKey(및 인코딩 변형)를 지운다 — 키가 예외 문자열의
+    URL로 새어 로그에 남지 않게."""
+    s = str(msg)
+    for v in {key, encode_key(key), urllib.parse.quote(key, safe=""),
+              urllib.parse.quote_plus(key)}:
+        if v:
+            s = s.replace(v, "[REDACTED]")
+    return s
+
+
 def pick(rec, keys):
     for k in keys:
         v = rec.get(k)
@@ -107,16 +165,17 @@ def api_get(path, key, params):
                   [f"{urllib.parse.quote(str(k))}={urllib.parse.quote(str(v))}"
                    for k, v in params.items()])
     url = f"{BASE}/{path}?{qs}"
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
     last = None
     for i in range(3):
         try:
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with _open_validated(url, timeout=30) as resp:
                 payload = json.loads(resp.read().decode("utf-8", "replace"))
             code = payload.get("code")
             if code in (-401, 401):
                 raise PermissionError(f"인증 실패: {payload.get('msg')}")
             return payload
+        except RedirectBlocked:
+            raise  # 외부 호스트 유출 시도 — 재시도 없이 즉시 실패
         except urllib.error.HTTPError as e:
             if e.code in (401, 403):
                 raise ManualEscalation(f"HTTP {e.code} — 인증 거부") from e
@@ -127,7 +186,8 @@ def api_get(path, key, params):
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as e:
             last = e
             time.sleep(MIN_DELAY * (i + 1) * 2)
-    raise RuntimeError(f"{path} failed after retries: {last}")
+    # last(HTTPError 등)의 문자열에 키 포함 URL이 실릴 수 있어 마스킹
+    raise RuntimeError(f"{path} failed after retries: {_redact(last, key)}")
 
 
 def status_from_deadline(text):

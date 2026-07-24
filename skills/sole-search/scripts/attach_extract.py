@@ -20,8 +20,10 @@ extract() 반환: {"ok": bool, "text": str, "reason": str}
 """
 import argparse
 import json
+import os
 import pathlib
 import re
+import select
 import shutil
 import struct
 import subprocess
@@ -32,9 +34,53 @@ from xml.etree import ElementTree
 
 HWP_MAGIC = bytes.fromhex("D0CF11E0A1B11AE1")  # OLE2 (구버전 .hwp)
 
+MAX_EXTRACT_OUTPUT = 60 * 1024 * 1024  # 추출기 stdout 상한 60MB — 텍스트 폭탄 방어
+
 
 def _result(ok, text="", reason=""):
     return {"ok": ok, "text": text, "reason": reason}
+
+
+def _run_capped(cmd, timeout, max_bytes=MAX_EXTRACT_OUTPUT):
+    """subprocess를 돌리되 stdout를 max_bytes까지만, 전체를 timeout 안에서만 읽는다
+    (Codex sole #4: 신뢰불가 문서가 무한/거대 텍스트를 뿜어 메모리·시간을 고갈시키는
+    것을 막는다). select로 데드라인을 지키고 상한 초과 시 프로세스를 죽인다.
+    반환: (returncode, stdout_bytes) — 상한 초과나 타임아웃이면 각각 RuntimeError/
+    TimeoutExpired를 올린다."""
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+    fd = p.stdout.fileno()
+    chunks, total = [], 0
+    deadline = time.monotonic() + timeout
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            r, _, _ = select.select([fd], [], [], remaining)
+            if not r:
+                raise subprocess.TimeoutExpired(cmd, timeout)
+            # os.read는 **지금 준비된 만큼만** 반환한다(최대 1MB) — 버퍼드 read(1<<20)는
+            # 1MB가 찰 때까지 블로킹해, 1바이트만 쓰고 멈춘 자식이 데드라인을 넘겨
+            # 매달리게 한다(Codex #4). select가 준비를 알린 fd에서만 읽는다.
+            chunk = os.read(fd, 1 << 20)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise RuntimeError("extract_output_too_large")
+            chunks.append(chunk)
+    finally:
+        try:
+            p.stdout.close()
+        except OSError:
+            pass
+        if p.poll() is None:
+            p.kill()
+        try:
+            p.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
+    return p.returncode, b"".join(chunks)
 
 
 MAX_PDF_BYTES = 100 * 1024 * 1024
@@ -46,13 +92,17 @@ def extract_pdf(path):
     if not shutil.which("pdftotext"):
         return _result(False, reason="pdftotext_unavailable")
     try:
-        p = subprocess.run(["pdftotext", "-layout", "-enc", "UTF-8", str(path), "-"],
-                           capture_output=True, timeout=120)
-    except (subprocess.TimeoutExpired, OSError) as e:
+        rc, out = _run_capped(
+            ["pdftotext", "-layout", "-enc", "UTF-8", str(path), "-"], timeout=120)
+    except subprocess.TimeoutExpired:
+        return _result(False, reason="pdftotext_timeout")
+    except RuntimeError:
+        return _result(False, reason="pdf_output_too_large")
+    except OSError as e:
         return _result(False, reason=f"pdftotext_error: {e}")
-    if p.returncode != 0:
-        return _result(False, reason=f"pdftotext_exit_{p.returncode}")
-    text = p.stdout.decode("utf-8", "replace").strip()
+    if rc != 0:
+        return _result(False, reason=f"pdftotext_exit_{rc}")
+    text = out.decode("utf-8", "replace").strip()
     if not text:
         return _result(False, reason="pdf_no_text_layer")  # 스캔본 등
     return _result(True, text=text)
@@ -118,18 +168,27 @@ def _cfb_read_stream(data, target):
     def sector(n):
         return data[512 + n * ssz:512 + (n + 1) * ssz]
 
+    # 신뢰불가 파일 방어(Codex sole #4): num_difat/섹터 체인은 헤더가 조작할 수
+    # 있다. 실제 섹터 수는 파일 크기로 상한이 정해지므로 그 이상은 무의미하고,
+    # 자기참조 체인(sector 0→0)은 무한 루프가 된다 — 파일 크기 기반 상한 +
+    # 방문 집합으로 사이클을 끊는다.
+    max_sectors = len(data) // ssz + 1 if ssz else 0
     difat = list(struct.unpack_from("<109I", data, 76))
     s = difat_start
-    for _ in range(num_difat):
-        if s in _CFB_END:
+    seen_difat = set()
+    for _ in range(min(num_difat, max_sectors)):
+        if s in _CFB_END or s in seen_difat or s >= max_sectors:
             break
+        seen_difat.add(s)
         vals = struct.unpack(f"<{per}I", sector(s))
         difat.extend(vals[:-1])
         s = vals[-1]
     fat = []
+    seen_fat = set()
     for fs in difat:
-        if fs in _CFB_END:
+        if fs in _CFB_END or fs in seen_fat or fs >= max_sectors:
             continue
+        seen_fat.add(fs)
         fat.extend(struct.unpack(f"<{per}I", sector(fs)))
 
     def chain(start, table):
@@ -184,12 +243,12 @@ def extract_hwp(path):
         return _result(False, reason="hwp_binary_unsupported")  # OLE 시그니처 아님
     if shutil.which("hwp5txt"):
         try:
-            p = subprocess.run(["hwp5txt", str(path)], capture_output=True, timeout=120)
-            if p.returncode == 0:
-                text = p.stdout.decode("utf-8", "replace").strip()
+            rc, out = _run_capped(["hwp5txt", str(path)], timeout=120)
+            if rc == 0:
+                text = out.decode("utf-8", "replace").strip()
                 if text:
                     return _result(True, text=text)
-        except (subprocess.TimeoutExpired, OSError):
+        except (subprocess.TimeoutExpired, RuntimeError, OSError):
             pass  # PrvText 폴백으로
     try:
         raw = _cfb_read_stream(path.read_bytes(), "PrvText")

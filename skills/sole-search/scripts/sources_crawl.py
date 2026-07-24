@@ -383,6 +383,34 @@ def cmd_detail(args):
             failures += 1
             time.sleep(args.delay)
             continue
+        # 응답 identity 결속(Codex sole #2): 서버가 다른 공고를 반환하면 그 본문을
+        # 요청 ID 레코드에 병합해 조용히 오염된다. 단순 substring 검사는 약하다 —
+        # 상세 페이지는 '이전글/관련공고' 링크에 다른 공고 ID를 담으므로, 요청 ID가
+        # 그런 링크에만 있으면 실제로는 다른 공고다. 관련공고 앵커(href의 pblancId)를
+        # 제거한 뒤에도 요청 ID가 남아야(현재 페이지의 altUrl/QR 자기참조) 인정한다.
+        req_m = re.search(r"pblancId=(PBLN_\d+)", url)
+        if req_m:
+            req_pid = req_m.group(1)
+            # 권위 있는 자기 ID를 **실제 실행 JS에서만** 수집해 유일 대조한다
+            # (Codex sole #2). altUrl은 <script> 안 JS 대입이므로: (1) 스크립트 블록만
+            # 추출, (2) 주석(블록·미종료·라인, 라인은 https:// 보호) 제거, (3) 남은
+            # 실행 코드에서 altUrl의 pblancId를 전부 수집, (4) 집합이 정확히 {요청}일
+            # 때만 통과 — 주석·평문·앵커 안의 위조 마커는 실행 JS가 아니라 배제된다.
+            script_texts, _cv, _in = _ad.page_self_markers(h)
+            ids, unknown = set(), False
+            for _s in script_texts:  # 스크립트별 독립 처리(이어붙이기 위조 방지)
+                r = _ad.alturl_pblanc_ids(_s)
+                if r is None:  # 알 수 없는 altUrl 문법 — fail-closed
+                    unknown = True
+                    break
+                ids |= r
+            if unknown or ids != {req_pid}:
+                print(f"[sole-search] {url[:60]}: 페이지 자기 pblancId({ids or '없음'})이 "
+                      f"요청({req_pid})과 유일 일치하지 않음 — 다른 공고 반환 의심, "
+                      "기록/병합 안 함 (fail-closed)", file=sys.stderr)
+                failures += 1
+                time.sleep(args.delay)
+                continue
         attach = [htmllib.unescape(u) for u in
                   re.findall(r'href="(/cmm/fms/[^"]+|/uploads/[^"]+)"', h)]
         attachments = [{"url": BASE + a, "filename": a.rsplit("/", 1)[-1].split("?")[0]}
@@ -402,10 +430,12 @@ def cmd_detail(args):
             except ManualEscalation as e:
                 print(f"MANUAL bizinfo attachment: {e}", file=sys.stderr)
                 return 3
-            downloads_ok = all(f.get("download_status") == "ok" for f in attachments)
             complete = all(f.get("extract_status") == "ok" for f in attachments)
-            if downloads_ok:
-                # hash v3: 본문 + 정렬된 첨부 sha256 — v2와 비교 불가(diff가 1회 CHANGED)
+            if complete:
+                # hash v3는 **추출까지 성공(complete)**했을 때만 — 다운로드만 되고
+                # 추출 미지원이면 v2 본문 해시를 유지해, 나중에 추출 성공 시 v2→v3
+                # 전환이 diff에서 CHANGED로 잡히게 한다(Codex sole #6: downloads_ok로
+                # v3를 찍으면 '첨부 미확인' 판정이 영구히 UNCHANGED로 흡수된다).
                 digest = content_hash_of(text, attach_hashes)
                 hash_version = HASH_VERSION_ATTACH
             # else: 첨부 다운로드 불완전 — 본문만의 v2 해시를 유지한다.

@@ -615,6 +615,40 @@ def cmd_detail(args):
             failures += 1
             time.sleep(args.delay)
             continue
+        # 응답 identity 결속(Codex sole #2): 단순 숫자 substring은 전화번호 등에
+        # 우연히 걸려 약하다 — 게시글 ID는 **구조적 자기참조**(view/<id>.do,
+        # nttId=<id>, common.download(<id>, bbsSn=<id> 등)에 나타나야 한다.
+        sid_num = sid.split("-", 1)[1] if "-" in sid else sid
+        if sid_num:
+            # 권위 있는 자기 ID를 **추출해 유일 대조**한다(Codex sole #2). HTML 주석을
+            # 먼저 제거(주석 내 위조 마커 무력화)하고, 소스별 현재 레코드 마커를 전부
+            # 수집해 집합이 정확히 {요청 ID}일 때만 통과한다. 이전글/관련 링크(<a href>)는
+            # 아래 마커 형태가 아니므로 잡히지 않는다.
+            #  - fanfan: `var nttId='<현재>'` 또는 hidden input name="nttId"
+            #  - ssb: canonical <link ... /view/<현재>.do>
+            # 실제 element/실행 JS만 파싱해 수집한다(Codex sole #2: raw 정규식은 script
+            # 텍스트 속 가짜 <link> 문자열·JS 문자열 리터럴 내 주석 구분자에 속는다).
+            script_texts, canonical_views, input_nttids = _ad.page_self_markers(h)
+            unknown = False
+            if source == "fanfandaero":
+                norm = set(input_nttids)
+                for _s in script_texts:  # code-state `nttId =` 정수 리터럴 대입만
+                    r = _ad.js_var_int_ids(_s, "nttId")
+                    if r is None:
+                        unknown = True
+                        break
+                    norm |= r
+            elif source == "seoulshinbo":
+                norm = set(canonical_views)
+            else:
+                norm = set()
+            if unknown or not (sid_num.isdigit() and norm == {int(sid_num)}):
+                print(f"[sole-search] {url[:70]}: 페이지 자기 ID({norm or '없음'})가 요청"
+                      f"({sid_num})과 유일 일치하지 않음 — 다른 공고 반환 의심, "
+                      "기록/병합 안 함 (fail-closed)", file=sys.stderr)
+                failures += 1
+                time.sleep(args.delay)
+                continue
         text = extract_body(h, start_pat)
         digest = hashlib.sha256(text.encode()).hexdigest()
         hash_version = HASH_VERSION
@@ -630,10 +664,11 @@ def cmd_detail(args):
             except ManualEscalation as e:
                 print(f"MANUAL {source} attachment: {e}", file=sys.stderr)
                 return 3
-            downloads_ok = all(f.get("download_status") == "ok" for f in attachments)
             complete = all(f.get("extract_status") == "ok" for f in attachments)
-            if downloads_ok:
-                # hash v3: 본문 + 정렬된 첨부 sha256 — v2와 비교 불가(diff가 1회 CHANGED)
+            if complete:
+                # hash v3는 **추출까지 성공(complete)**했을 때만 (Codex sole #6) —
+                # 다운로드만 되고 추출 미지원이면 v2 본문 해시 유지, 나중 추출 성공
+                # 시 v2→v3 전환이 diff에서 CHANGED로 잡히게 한다.
                 digest = content_hash_of(text, attach_hashes)
                 hash_version = HASH_VERSION_ATTACH
             # else: 첨부 다운로드 불완전 — 본문만의 v2 해시를 유지한다.
