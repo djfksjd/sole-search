@@ -1,6 +1,6 @@
 {
   "name": "sole-search",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "한국 소상공인 지원사업(보조금·바우처, 정책자금 대출·보증, 교육·컨설팅) 전수조사 및 자격 판정 스킬 — 소상공인24·기업마당·소진공 크롤링 + 가게 프로필 기반 판정 (Korea-only).",
   "contextFileName": "AGENTS.md"
 }
